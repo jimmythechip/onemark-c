@@ -364,6 +364,25 @@ static void json_escape_to(FILE *fp, const char *s)
 	fputc('"', fp);
 }
 
+void file_init_empty(struct NotebookFile *f, const char *path)
+{
+	memset(f, 0, sizeof *f);
+	f->path = xstrdup(path);
+	/* extract basename */
+	{
+		const char *slash = strrchr(path, '/');
+		const char *base = slash ? slash + 1 : path;
+		char *dot;
+		f->name = xstrdup(base);
+		dot = strrchr(f->name, '.');
+		if (dot) *dot = '\0';
+	}
+	f->fm.onemark = 1;
+	f->fm.schema = 1;
+	timestamp_now(f->fm.created, sizeof f->fm.created);
+	snprintf(f->fm.modified, sizeof f->fm.modified, "%s", f->fm.created);
+}
+
 int file_save(const struct NotebookFile *f)
 {
 	FILE *fp = fopen(f->path, "w");

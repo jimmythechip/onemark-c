@@ -163,6 +163,7 @@ int  plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms);
 
 /* --- file format --------------------------------------------------------- */
 int  file_parse(struct NotebookFile *f, const char *path);
+void file_init_empty(struct NotebookFile *f, const char *path);
 int  file_serialize(const struct NotebookFile *f, char **out, size_t *outlen);
 int  file_save(const struct NotebookFile *f);
 

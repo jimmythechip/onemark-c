@@ -332,14 +332,12 @@ int main(int argc, char **argv)
 	int key;
 	struct MouseEvent mouse;
 
-	if (argc < 2) {
-		fprintf(stderr, "usage: onemark <file.md>\n");
-		return 1;
-	}
-
-	if (file_parse(&file, argv[1]) != 0) {
-		fprintf(stderr, "failed to parse: %s\n", argv[1]);
-		return 1;
+	{
+		const char *path = argc >= 2 ? argv[1] : "notes.md";
+		if (file_parse(&file, path) != 0) {
+			/* file doesn't exist or is empty — create new */
+			file_init_empty(&file, path);
+		}
 	}
 
 	vim_init(&vim);
