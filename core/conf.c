@@ -22,6 +22,7 @@ extern int  cfg_box_w;
 extern int  cfg_box_h;
 extern int  cfg_undo_max;
 extern int  cfg_save_debounce_ms;
+extern int  cfg_max_box_cols;
 
 static void trim(char *s)
 {
@@ -94,6 +95,9 @@ void conf_load(void)
 		} else if (strcmp(key, "save_debounce_ms") == 0) {
 			int v = atoi(val);
 			if (v >= 0) cfg_save_debounce_ms = v;
+		} else if (strcmp(key, "max_box_cols") == 0) {
+			int v = atoi(val);
+			if (v >= 10 && v <= 300) cfg_max_box_cols = v;
 		}
 		/* unknown keys silently ignored */
 	}
@@ -110,4 +114,24 @@ void conf_ensure_dir(void)
 	mkdir(dir, 0755);
 	snprintf(dir, sizeof dir, "%s/.config/onemark", home);
 	mkdir(dir, 0755);
+
+	/* write default config if it doesn't exist */
+	char path[512];
+	snprintf(path, sizeof path, "%s/.config/onemark/config", home);
+	if (access(path, F_OK) != 0) {
+		FILE *fp = fopen(path, "w");
+		if (fp) {
+			fprintf(fp, "# onemark configuration\n");
+			fprintf(fp, "# edit and restart (or recompile config.h for compile-time)\n\n");
+			fprintf(fp, "# leader = <space>\n");
+			fprintf(fp, "# cell_w = 8\n");
+			fprintf(fp, "# cell_h = 16\n");
+			fprintf(fp, "# box_w = 320\n");
+			fprintf(fp, "# box_h = 180\n");
+			fprintf(fp, "# max_box_cols = 80\n");
+			fprintf(fp, "# undo_max = 100\n");
+			fprintf(fp, "# save_debounce_ms = 500\n");
+			fclose(fp);
+		}
+	}
 }

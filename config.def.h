@@ -21,6 +21,9 @@ int cfg_undo_max = 100;
 /* auto-save debounce in milliseconds (0 = disabled) */
 int cfg_save_debounce_ms = 500;
 
+/* maximum box width in terminal columns (auto-grow stops here) */
+int cfg_max_box_cols = 80;
+
 /* tag definitions: name + ANSI color (0-7) */
 const struct { const char *name; int color; } cfg_tags[] = {
 	{ "none",      7 },  /* white */

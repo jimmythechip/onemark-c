@@ -215,9 +215,47 @@ static void draw_status(void)
 	} else {
 		const char *fname = file.name ? file.name : "(no file)";
 		int box_num = focused_box >= 0 ? focused_box + 1 : 0;
-		snprintf(status, sizeof status, " %s | %s | box %d/%d %s",
-			mode_str, fname, box_num, file.box_count,
-			file.dirty ? "[+]" : "");
+
+		/* cursor line:col for focused box */
+		int cur_line = 0, cur_col = 0;
+		const char *box_title = "";
+		const char *tag_str = "";
+		if (focused_box >= 0 && focused_box < file.box_count) {
+			struct Box *fb = &file.boxes[focused_box];
+			box_title = fb->title ? fb->title : "";
+			int pos = fb->body.gap_start;
+			int blen = gap_len(&fb->body);
+			cur_line = 1;
+			cur_col = 1;
+			for (int ci = 0; ci < pos && ci < blen; ci++) {
+				if (gap_char_at(&fb->body, ci) == '\n') {
+					cur_line++;
+					cur_col = 1;
+				} else {
+					cur_col++;
+				}
+			}
+			switch (fb->tag) {
+			case TAG_IDEA:      tag_str = " [idea]"; break;
+			case TAG_TODO:       tag_str = " [todo]"; break;
+			case TAG_REFERENCE:  tag_str = " [ref]"; break;
+			default: break;
+			}
+		}
+
+		if (editing && focused_box >= 0) {
+			snprintf(status, sizeof status,
+				" %s | %.20s%s | %d:%d | %s %d/%d %s",
+				mode_str, box_title, tag_str,
+				cur_line, cur_col,
+				fname, box_num, file.box_count,
+				file.dirty ? "[+]" : "");
+		} else {
+			snprintf(status, sizeof status,
+				" %s | %s | box %d/%d %s",
+				mode_str, fname, box_num, file.box_count,
+				file.dirty ? "[+]" : "");
+		}
 	}
 
 	plat_move(rows - 1, 0);
@@ -850,6 +888,27 @@ do_drag:
 
 			if (vim.result == VIM_RESULT_NONE && vim.mode == MODE_INSERT)
 				file.dirty = 1;
+
+			/* auto-grow box width to fit longest line (up to cfg_max_box_cols) */
+			{
+				int max_line = 0;
+				int cur_line = 0;
+				int blen = gap_len(&b->body);
+				for (int ci = 0; ci < blen; ci++) {
+					if (gap_char_at(&b->body, ci) == '\n') {
+						if (cur_line > max_line) max_line = cur_line;
+						cur_line = 0;
+					} else {
+						cur_line++;
+					}
+				}
+				if (cur_line > max_line) max_line = cur_line;
+				/* +2 for box borders, +1 for padding */
+				int need_cols = max_line + 3;
+				if (need_cols > cfg_max_box_cols) need_cols = cfg_max_box_cols;
+				int need_px = need_cols * cfg_cell_w;
+				if (need_px > b->w) b->w = need_px;
+			}
 
 			redraw();
 			continue;
