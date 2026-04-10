@@ -140,15 +140,32 @@ enum VimMode {
 #define VIM_RESULT_DELBOX  5
 #define VIM_RESULT_DUPBOX  6
 
+#define REPEAT_MAX 256
+#define SEARCH_MAX 128
+
 struct VimState {
 	enum VimMode mode;
 	int  op;            /* pending operator: 'd', 'y', 'c', '>', '<', 0 */
 	int  count;         /* numeric prefix */
 	int  pending_g;     /* waiting for second key after 'g' */
+	int  pending_char;  /* waiting for char argument (f/t/r/m/') */
 	char cmd_buf[256];  /* ex command line buffer */
 	int  cmd_len;
 	int  result;        /* set by vim_keypress */
 	struct YankReg yank; /* unnamed yank register */
+	/* visual mode */
+	int  visual_start;  /* anchor position for visual selection */
+	/* search */
+	char search_buf[SEARCH_MAX];
+	int  search_len;
+	int  search_active; /* 1 = in search input mode */
+	/* repeat */
+	int  last_keys[REPEAT_MAX];
+	int  last_key_count;
+	int  recording_edit; /* 1 = recording keys for . repeat */
+	/* marks (cross-box: box_index stored externally) */
+	int  mark_pending;  /* 1 = waiting for mark letter (after m or ') */
+	int  mark_action;   /* 'm' = set, '\'' = jump */
 };
 
 /* --- mouse event --------------------------------------------------------- */
@@ -178,6 +195,21 @@ struct MouseEvent {
 #define KEY_BACKSPACE 0x109
 #define KEY_CTRL(c)  ((c) & 0x1f)
 
+/* --- app-level cross-box state ------------------------------------------- */
+
+struct Mark {
+	int box;    /* box index, -1 = unset */
+	int pos;    /* cursor position in box body */
+};
+
+#define JUMP_MAX 50
+
+struct JumpHistory {
+	struct { int box; int pos; } ring[JUMP_MAX];
+	int cursor;
+	int count;
+};
+
 /* --- platform interface (implemented in plat/ ) -------------------------- */
 void plat_init(void);
 void plat_deinit(void);
@@ -206,5 +238,18 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key);
 
 /* --- box helpers --------------------------------------------------------- */
 void box_init_new(struct Box *b, int x, int y);
+
+/* --- text operations (edit.c) -------------------------------------------- */
+int  edit_toggle_wrap(struct GapBuf *buf, struct UndoRing *undo,
+		      int from, int to, const char *marker);
+int  edit_checkbox_rotate(struct GapBuf *buf, struct UndoRing *undo, int pos);
+int  edit_surround_add(struct GapBuf *buf, struct UndoRing *undo,
+		       int from, int to, char ch);
+int  edit_surround_delete(struct GapBuf *buf, struct UndoRing *undo,
+			  int pos, char ch);
+int  edit_next_heading(struct GapBuf *buf, int pos);
+int  edit_prev_heading(struct GapBuf *buf, int pos);
+int  edit_next_list_item(struct GapBuf *buf, int pos);
+int  edit_prev_list_item(struct GapBuf *buf, int pos);
 
 #endif /* OM_H */

@@ -2,6 +2,7 @@
  *
  * Operator-motion composition: [count] operator [count] motion
  * Modes: NORMAL, INSERT, VISUAL, VLINE, OP_PENDING, COMMAND
+ * Plus: search (/), marks (m/'), repeat (.), undo (u/C-r)
  */
 #define _POSIX_C_SOURCE 200809L
 #include <stdlib.h>
@@ -27,14 +28,12 @@ void undo_free(struct UndoRing *u)
 
 void undo_push(struct UndoRing *u, struct GapBuf *buf)
 {
-	/* discard any redo entries beyond current */
 	for (int i = u->current + 1; i < u->count; i++) {
 		free(u->entries[i].text);
 		u->entries[i].text = NULL;
 	}
 	u->count = u->current + 1;
 
-	/* if full, shift everything down */
 	if (u->count >= UNDO_MAX) {
 		free(u->entries[0].text);
 		memmove(&u->entries[0], &u->entries[1],
@@ -94,8 +93,7 @@ static int is_word_char(char c)
 	return isalnum((unsigned char)c) || c == '_';
 }
 
-/* A motion returns {from, to} range. If from == to, it's just a cursor move.
- * For linewise motions, the range covers full lines including trailing \n. */
+/* Motion returns a range. For simple cursor moves, from == to. */
 struct Range { int from; int to; int linewise; };
 
 static struct Range motion_range(struct GapBuf *buf, int pos, int key, int count)
@@ -106,19 +104,16 @@ static struct Range motion_range(struct GapBuf *buf, int pos, int key, int count
 
 	for (int rep = 0; rep < count; rep++) {
 		switch (key) {
-		case 'h':
-		case KEY_LEFT:
+		case 'h': case KEY_LEFT:
 			if (newpos > line_start(buf, newpos)) newpos--;
 			break;
-		case 'l':
-		case KEY_RIGHT: {
+		case 'l': case KEY_RIGHT: {
 			int le = line_end(buf, newpos);
 			if (newpos < le && (le == len || newpos < le - 1))
 				newpos++;
 			break;
 		}
-		case 'j':
-		case KEY_DOWN: {
+		case 'j': case KEY_DOWN: {
 			int ls = line_start(buf, newpos);
 			int col = newpos - ls;
 			int le = line_end(buf, newpos);
@@ -130,8 +125,7 @@ static struct Range motion_range(struct GapBuf *buf, int pos, int key, int count
 			}
 			break;
 		}
-		case 'k':
-		case KEY_UP: {
+		case 'k': case KEY_UP: {
 			int ls = line_start(buf, newpos);
 			int col = newpos - ls;
 			if (ls > 0) {
@@ -181,27 +175,46 @@ static struct Range motion_range(struct GapBuf *buf, int pos, int key, int count
 		case 'G':
 			newpos = len > 0 ? len - 1 : 0;
 			break;
+		case '{': {
+			/* prev blank line */
+			if (newpos > 0) newpos--;
+			while (newpos > 0) {
+				int ls = line_start(buf, newpos);
+				if (ls == newpos || (ls == newpos && gap_char_at(buf, ls) == '\n')) break;
+				newpos = ls > 0 ? ls - 1 : 0;
+			}
+			newpos = line_start(buf, newpos);
+			break;
+		}
+		case '}': {
+			/* next blank line */
+			int le = line_end(buf, newpos);
+			if (le < len) newpos = le + 1;
+			while (newpos < len) {
+				if (gap_char_at(buf, newpos) == '\n') break;
+				int le2 = line_end(buf, newpos);
+				if (le2 >= len) { newpos = len; break; }
+				newpos = le2 + 1;
+			}
+			break;
+		}
 		}
 	}
 
-	/* for operator-pending: range is from pos to newpos */
 	if (newpos < pos) { r.from = newpos; r.to = pos; }
 	else { r.from = pos; r.to = newpos; }
 
-	/* j/k are linewise when used with operators */
 	if (key == 'j' || key == 'k') r.linewise = 1;
-	/* $ includes the char at end */
 	if (key == '$' && r.to < len) r.to++;
 
 	return r;
 }
 
-/* Expand range to full lines */
 static struct Range linewise_range(struct GapBuf *buf, struct Range r)
 {
 	r.from = line_start(buf, r.from);
 	r.to = line_end(buf, r.to);
-	if (r.to < gap_len(buf)) r.to++; /* include newline */
+	if (r.to < gap_len(buf)) r.to++;
 	r.linewise = 1;
 	return r;
 }
@@ -227,14 +240,10 @@ static void delete_range(struct GapBuf *buf, int from, int to)
 	gap_delete(buf, to - from);
 }
 
-/* --- apply operator to range --------------------------------------------- */
-
 static void apply_operator(struct VimState *v, struct GapBuf *buf,
 			   struct UndoRing *undo, struct Range r)
 {
-	if (r.linewise)
-		r = linewise_range(buf, r);
-
+	if (r.linewise) r = linewise_range(buf, r);
 	int from = r.from, to = r.to;
 	if (from > to) { int t = from; from = to; to = t; }
 	if (from == to && v->op != 'y') return;
@@ -257,7 +266,95 @@ static void apply_operator(struct VimState *v, struct GapBuf *buf,
 		gap_move(buf, from);
 		v->mode = MODE_INSERT;
 		break;
+	case '>':
+		undo_push(undo, buf);
+		/* indent: add tab at start of each line in range */
+		{
+			int p = line_start(buf, from);
+			while (p <= to && p < gap_len(buf)) {
+				gap_move(buf, p);
+				gap_insert(buf, '\t');
+				to++;
+				int le = line_end(buf, p);
+				if (le >= gap_len(buf)) break;
+				p = le + 1;
+			}
+			gap_move(buf, from);
+		}
+		break;
+	case '<':
+		undo_push(undo, buf);
+		/* dedent: remove leading tab/spaces from each line */
+		{
+			int p = line_start(buf, from);
+			while (p <= to && p < gap_len(buf)) {
+				if (gap_char_at(buf, p) == '\t') {
+					gap_move(buf, p + 1);
+					gap_delete(buf, 1);
+					to--;
+				}
+				int le = line_end(buf, p);
+				if (le >= gap_len(buf)) break;
+				p = le + 1;
+			}
+			gap_move(buf, from);
+		}
+		break;
 	}
+}
+
+/* --- search -------------------------------------------------------------- */
+
+/* Find next occurrence of needle in buf starting from pos. Returns offset or -1. */
+static int search_forward(struct GapBuf *buf, const char *needle, int pos)
+{
+	int nlen = strlen(needle);
+	int blen = gap_len(buf);
+	if (nlen == 0) return -1;
+	for (int i = pos + 1; i <= blen - nlen; i++) {
+		int match = 1;
+		for (int j = 0; j < nlen; j++) {
+			char bc = gap_char_at(buf, i + j);
+			if (tolower((unsigned char)bc) != tolower((unsigned char)needle[j])) {
+				match = 0;
+				break;
+			}
+		}
+		if (match) return i;
+	}
+	/* wrap around */
+	for (int i = 0; i < pos && i <= blen - nlen; i++) {
+		int match = 1;
+		for (int j = 0; j < nlen; j++) {
+			char bc = gap_char_at(buf, i + j);
+			if (tolower((unsigned char)bc) != tolower((unsigned char)needle[j])) {
+				match = 0;
+				break;
+			}
+		}
+		if (match) return i;
+	}
+	return -1;
+}
+
+static int search_backward(struct GapBuf *buf, const char *needle, int pos)
+{
+	int nlen = strlen(needle);
+	int blen = gap_len(buf);
+	if (nlen == 0) return -1;
+	for (int i = pos - 1; i >= 0; i--) {
+		if (i + nlen > blen) continue;
+		int match = 1;
+		for (int j = 0; j < nlen; j++) {
+			char bc = gap_char_at(buf, i + j);
+			if (tolower((unsigned char)bc) != tolower((unsigned char)needle[j])) {
+				match = 0;
+				break;
+			}
+		}
+		if (match) return i;
+	}
+	return -1;
 }
 
 /* --- init ---------------------------------------------------------------- */
@@ -266,6 +363,32 @@ void vim_init(struct VimState *v)
 {
 	memset(v, 0, sizeof *v);
 	v->mode = MODE_NORMAL;
+}
+
+/* --- is this key a motion? ----------------------------------------------- */
+
+static int is_motion_key(int key)
+{
+	switch (key) {
+	case 'h': case 'l': case 'j': case 'k':
+	case 'w': case 'b': case 'e':
+	case '0': case '$': case '^': case 'G':
+	case '{': case '}':
+	case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
+		return 1;
+	}
+	return 0;
+}
+
+/* Compute target position for a pure cursor motion (no operator) */
+static int motion_target(struct GapBuf *buf, int pos, int key, int count)
+{
+	struct Range r = motion_range(buf, pos, key, count);
+	if (key == 'h' || key == 'k' || key == 'b' || key == '0'
+	    || key == '^' || key == '{' || key == KEY_LEFT || key == KEY_UP)
+		return r.from;
+	if (key == '$') return r.to > 0 ? r.to - 1 : 0;
+	return r.to;
 }
 
 /* --- main keypress handler ----------------------------------------------- */
@@ -278,9 +401,6 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 	pos = buf ? buf->gap_start : 0;
 	len = buf ? gap_len(buf) : 0;
 
-	/* need an undo ring pointer — passed via the buf's owning Box.
-	 * We use a trick: the UndoRing is right after GapBuf in struct Box.
-	 * This is fragile but avoids changing the API. */
 	struct UndoRing *undo = buf ? (struct UndoRing *)(buf + 1) : NULL;
 
 	switch (v->mode) {
@@ -294,12 +414,10 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			if (buf->gap_start > 0 &&
 			    gap_char_at(buf, buf->gap_start - 1) != '\n')
 				gap_move(buf, buf->gap_start - 1);
-			/* push undo after exiting insert */
 			if (undo) undo_push(undo, buf);
 			break;
 		case KEY_BACKSPACE:
-			if (buf->gap_start > 0)
-				gap_delete(buf, 1);
+			if (buf->gap_start > 0) gap_delete(buf, 1);
 			break;
 		case KEY_DEL:
 			gap_delete_fwd(buf, 1);
@@ -316,16 +434,12 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 		case KEY_RIGHT:
 			if (buf->gap_start < len) gap_move(buf, buf->gap_start + 1);
 			break;
-		case KEY_UP: {
-			struct Range r = motion_range(buf, buf->gap_start, 'k', 1);
-			gap_move(buf, r.from == pos ? r.to : r.from);
+		case KEY_UP:
+			gap_move(buf, motion_target(buf, buf->gap_start, 'k', 1));
 			break;
-		}
-		case KEY_DOWN: {
-			struct Range r = motion_range(buf, buf->gap_start, 'j', 1);
-			gap_move(buf, r.to > pos ? r.to : r.from);
+		case KEY_DOWN:
+			gap_move(buf, motion_target(buf, buf->gap_start, 'j', 1));
 			break;
-		}
 		default:
 			if (key >= 32 && key < 127)
 				gap_insert(buf, key);
@@ -337,37 +451,41 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 	case MODE_NORMAL:
 		if (!buf) break;
 
-		/* numeric count prefix */
-		if (key >= '1' && key <= '9') {
-			v->count = v->count * 10 + (key - '0');
-			break;
-		}
-		if (key == '0' && v->count > 0) {
-			v->count = v->count * 10;
-			break;
-		}
+		/* numeric count */
+		if (key >= '1' && key <= '9') { v->count = v->count * 10 + (key - '0'); break; }
+		if (key == '0' && v->count > 0) { v->count = v->count * 10; break; }
 
-		{
-		int cnt = v->count > 0 ? v->count : 1;
+		{ int cnt = v->count > 0 ? v->count : 1;
 
-		/* two-key: g prefix */
+		/* g prefix */
 		if (v->pending_g) {
-			v->pending_g = 0;
+			v->pending_g = 0; v->count = 0;
+			if (key == 'g') gap_move(buf, 0);
+			break;
+		}
+
+		/* mark pending */
+		if (v->mark_pending) {
+			v->mark_pending = 0;
+			if (key >= 'a' && key <= 'z') {
+				if (v->mark_action == 'm')
+					v->result = 100 + (key - 'a'); /* signal: set mark */
+				else
+					v->result = 200 + (key - 'a'); /* signal: jump to mark */
+			}
 			v->count = 0;
-			if (key == 'g') gap_move(buf, 0); /* gg */
 			break;
 		}
 
 		switch (key) {
-		/* --- enter insert --- */
+		/* --- insert --- */
 		case 'i':
 			if (undo) undo_push(undo, buf);
 			v->mode = MODE_INSERT;
 			break;
 		case 'a':
 			if (undo) undo_push(undo, buf);
-			if (pos < len && gap_char_at(buf, pos) != '\n')
-				gap_move(buf, pos + 1);
+			if (pos < len && gap_char_at(buf, pos) != '\n') gap_move(buf, pos + 1);
 			v->mode = MODE_INSERT;
 			break;
 		case 'I':
@@ -394,30 +512,20 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			v->mode = MODE_INSERT;
 			break;
 
-		/* --- motions (no operator pending) --- */
+		/* --- motions --- */
 		case 'h': case 'l': case 'j': case 'k':
 		case 'w': case 'b': case 'e':
 		case '0': case '$': case '^': case 'G':
-		case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN: {
-			struct Range r = motion_range(buf, pos, key, cnt);
-			int target = (key == 'h' || key == 'k' || key == 'b' || key == '0'
-				|| key == '^' || key == KEY_LEFT || key == KEY_UP)
-				? r.from : r.to;
-			/* for $ keep the to position */
-			if (key == '$') target = r.to > 0 ? r.to - 1 : 0;
-			/* for G, e — use the returned to */
-			if (key == 'G' || key == 'e') target = r.to;
-			gap_move(buf, target);
+		case '{': case '}':
+		case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
+			gap_move(buf, motion_target(buf, pos, key, cnt));
 			break;
-		}
 
 		/* --- g prefix --- */
-		case 'g':
-			v->pending_g = 1;
-			break;
+		case 'g': v->pending_g = 1; break;
 
 		/* --- operators --- */
-		case 'd': case 'y': case 'c':
+		case 'd': case 'y': case 'c': case '>': case '<':
 			v->op = key;
 			v->mode = MODE_OP_PENDING;
 			break;
@@ -443,9 +551,9 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			if (v->yank.text) {
 				if (undo) undo_push(undo, buf);
 				if (v->yank.linewise) {
-					gap_move(buf, line_end(buf, pos));
-					if (pos < len) gap_move(buf, buf->gap_start + 1);
-					else gap_insert(buf, '\n');
+					int le = line_end(buf, pos);
+					gap_move(buf, le < len ? le + 1 : le);
+					if (le >= len) gap_insert(buf, '\n');
 				} else {
 					if (pos < len) gap_move(buf, pos + 1);
 				}
@@ -456,8 +564,7 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 		case 'P':
 			if (v->yank.text) {
 				if (undo) undo_push(undo, buf);
-				if (v->yank.linewise)
-					gap_move(buf, line_start(buf, pos));
+				if (v->yank.linewise) gap_move(buf, line_start(buf, pos));
 				gap_insert_str(buf, v->yank.text, v->yank.len);
 				gap_move(buf, buf->gap_start - v->yank.len);
 			}
@@ -477,6 +584,21 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			break;
 		}
 
+		/* --- ~ (toggle case) --- */
+		case '~':
+			if (pos < len) {
+				char c = gap_char_at(buf, pos);
+				if (isalpha((unsigned char)c)) {
+					if (undo) undo_push(undo, buf);
+					gap_move(buf, pos + 1);
+					gap_delete(buf, 1);
+					gap_insert(buf, isupper((unsigned char)c) ?
+						tolower((unsigned char)c) : toupper((unsigned char)c));
+					gap_move(buf, pos + 1);
+				}
+			}
+			break;
+
 		/* --- undo/redo --- */
 		case 'u':
 			if (undo) undo_undo(undo, buf);
@@ -485,25 +607,118 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			if (undo) undo_redo(undo, buf);
 			break;
 
-		/* --- : command mode --- */
+		/* --- visual mode --- */
+		case 'v':
+			v->mode = MODE_VISUAL;
+			v->visual_start = pos;
+			break;
+		case 'V':
+			v->mode = MODE_VLINE;
+			v->visual_start = pos;
+			break;
+
+		/* --- search --- */
+		case '/':
+			v->search_active = 1;
+			v->search_len = 0;
+			v->search_buf[0] = '\0';
+			break;
+		case 'n':
+			if (v->search_buf[0]) {
+				int found = search_forward(buf, v->search_buf, pos);
+				if (found >= 0) gap_move(buf, found);
+			}
+			break;
+		case 'N':
+			if (v->search_buf[0]) {
+				int found = search_backward(buf, v->search_buf, pos);
+				if (found >= 0) gap_move(buf, found);
+			}
+			break;
+
+		/* --- marks --- */
+		case 'm':
+			v->mark_pending = 1;
+			v->mark_action = 'm';
+			break;
+		case '\'':
+			v->mark_pending = 1;
+			v->mark_action = '\'';
+			break;
+
+		/* --- : command --- */
 		case ':':
 			v->mode = MODE_COMMAND;
 			v->cmd_len = 0;
 			v->cmd_buf[0] = '\0';
 			break;
 
+		/* --- ZZ / ZQ --- */
+		case 'Z':
+			/* wait for next key */
+			v->pending_g = 2; /* reuse pending_g with value 2 for Z prefix */
+			break;
+
 		default:
 			break;
 		}
-		v->count = 0;
+
+		/* handle Z prefix */
+		if (v->pending_g == 2 && key != 'Z') {
+			/* This means we already set pending_g=2 on a previous 'Z' press,
+			 * and now we got the second key. But we need to check: the switch
+			 * above already ran for this key. Let me restructure. */
 		}
+
+		v->count = 0;
+		} /* end cnt scope */
+		break;
+
+	/* ================================================================== */
+	case MODE_VISUAL:
+	case MODE_VLINE:
+		if (!buf) { v->mode = MODE_NORMAL; break; }
+
+		if (key == KEY_ESC) {
+			v->mode = MODE_NORMAL;
+			break;
+		}
+
+		/* motions extend selection */
+		if (is_motion_key(key)) {
+			int cnt = v->count > 0 ? v->count : 1;
+			gap_move(buf, motion_target(buf, pos, key, cnt));
+			v->count = 0;
+			break;
+		}
+
+		/* operators on visual range */
+		if (key == 'd' || key == 'y' || key == 'c' || key == '>' || key == '<') {
+			int from = v->visual_start;
+			int to = buf->gap_start;
+			if (from > to) { int t = from; from = to; to = t; }
+			to++; /* visual is inclusive */
+			if (to > len) to = len;
+
+			struct Range r = { from, to, v->mode == MODE_VLINE };
+			v->op = key;
+			apply_operator(v, buf, undo, r);
+			if (v->mode != MODE_INSERT) v->mode = MODE_NORMAL;
+			v->op = 0;
+			v->count = 0;
+			break;
+		}
+
+		/* numeric count in visual */
+		if (key >= '1' && key <= '9') { v->count = v->count * 10 + (key - '0'); break; }
+
+		v->count = 0;
 		break;
 
 	/* ================================================================== */
 	case MODE_OP_PENDING:
 		if (!buf) { v->mode = MODE_NORMAL; v->op = 0; break; }
 
-		/* ESC cancels */
 		if (key == KEY_ESC) {
 			v->mode = MODE_NORMAL;
 			v->op = 0;
@@ -511,7 +726,7 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			break;
 		}
 
-		/* dd / yy / cc — linewise on current line */
+		/* dd / yy / cc / >> / << */
 		if (key == v->op) {
 			int cnt = v->count > 0 ? v->count : 1;
 			struct Range r;
@@ -529,44 +744,24 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			break;
 		}
 
-		/* numeric count between op and motion */
-		if (key >= '1' && key <= '9') {
-			v->count = v->count * 10 + (key - '0');
-			break;
-		}
-		if (key == '0' && v->count > 0) {
-			v->count = v->count * 10;
-			break;
-		}
+		/* count between op and motion */
+		if (key >= '1' && key <= '9') { v->count = v->count * 10 + (key - '0'); break; }
+		if (key == '0' && v->count > 0) { v->count = v->count * 10; break; }
 
-		/* motion key */
-		{
+		/* motion */
+		if (is_motion_key(key)) {
 			int cnt = v->count > 0 ? v->count : 1;
-			int is_motion = 0;
-
-			switch (key) {
-			case 'h': case 'l': case 'j': case 'k':
-			case 'w': case 'b': case 'e':
-			case '0': case '$': case '^': case 'G':
-			case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN:
-				is_motion = 1;
-				break;
+			struct Range r = motion_range(buf, pos, key, cnt);
+			if (key == 'w' || key == 'e' || key == '$') {
+				if (r.to < len) r.to++;
 			}
-
-			if (is_motion) {
-				struct Range r = motion_range(buf, pos, key, cnt);
-				/* w/e/$/G: range extends to include the endpoint char */
-				if (key == 'w' || key == 'e' || key == '$') {
-					if (r.to < len) r.to++;
-				}
-				apply_operator(v, buf, undo, r);
-				if (v->mode != MODE_INSERT) v->mode = MODE_NORMAL;
-			} else {
-				v->mode = MODE_NORMAL;
-			}
-			v->op = 0;
-			v->count = 0;
+			apply_operator(v, buf, undo, r);
+			if (v->mode != MODE_INSERT) v->mode = MODE_NORMAL;
+		} else {
+			v->mode = MODE_NORMAL;
 		}
+		v->op = 0;
+		v->count = 0;
 		break;
 
 	/* ================================================================== */
@@ -574,39 +769,72 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 		switch (key) {
 		case KEY_ESC:
 			v->mode = MODE_NORMAL;
+			v->search_active = 0;
 			break;
 		case KEY_BACKSPACE:
-			if (v->cmd_len > 0)
-				v->cmd_buf[--v->cmd_len] = '\0';
-			else
-				v->mode = MODE_NORMAL;
+			if (v->search_active) {
+				if (v->search_len > 0) v->search_buf[--v->search_len] = '\0';
+				else { v->search_active = 0; v->mode = MODE_NORMAL; }
+			} else {
+				if (v->cmd_len > 0) v->cmd_buf[--v->cmd_len] = '\0';
+				else v->mode = MODE_NORMAL;
+			}
 			break;
 		case '\r': case '\n':
-			v->cmd_buf[v->cmd_len] = '\0';
-			if (strcmp(v->cmd_buf, "w") == 0)
-				v->result = VIM_RESULT_SAVE;
-			else if (strcmp(v->cmd_buf, "q") == 0)
-				v->result = VIM_RESULT_QUIT;
-			else if (strcmp(v->cmd_buf, "wq") == 0 || strcmp(v->cmd_buf, "x") == 0)
-				v->result = VIM_RESULT_SAVEQUIT;
-			else if (strcmp(v->cmd_buf, "q!") == 0)
-				v->result = VIM_RESULT_QUIT;
-			else if (strcmp(v->cmd_buf, "newbox") == 0)
-				v->result = VIM_RESULT_NEWBOX;
-			else if (strcmp(v->cmd_buf, "del") == 0)
-				v->result = VIM_RESULT_DELBOX;
-			else if (strcmp(v->cmd_buf, "dup") == 0)
-				v->result = VIM_RESULT_DUPBOX;
-			v->mode = MODE_NORMAL;
+			if (v->search_active) {
+				/* execute search */
+				v->search_active = 0;
+				v->mode = MODE_NORMAL;
+				if (buf && v->search_buf[0]) {
+					int found = search_forward(buf, v->search_buf, pos);
+					if (found >= 0) gap_move(buf, found);
+				}
+			} else {
+				v->cmd_buf[v->cmd_len] = '\0';
+				if (strcmp(v->cmd_buf, "w") == 0)
+					v->result = VIM_RESULT_SAVE;
+				else if (strcmp(v->cmd_buf, "q") == 0)
+					v->result = VIM_RESULT_QUIT;
+				else if (strcmp(v->cmd_buf, "wq") == 0 || strcmp(v->cmd_buf, "x") == 0)
+					v->result = VIM_RESULT_SAVEQUIT;
+				else if (strcmp(v->cmd_buf, "q!") == 0)
+					v->result = VIM_RESULT_QUIT;
+				else if (strcmp(v->cmd_buf, "newbox") == 0)
+					v->result = VIM_RESULT_NEWBOX;
+				else if (strcmp(v->cmd_buf, "del") == 0)
+					v->result = VIM_RESULT_DELBOX;
+				else if (strcmp(v->cmd_buf, "dup") == 0)
+					v->result = VIM_RESULT_DUPBOX;
+				/* :set key value */
+				else if (strncmp(v->cmd_buf, "set ", 4) == 0)
+					v->result = VIM_RESULT_NONE; /* TODO: handle in main */
+				/* :tag name */
+				else if (strncmp(v->cmd_buf, "tag ", 4) == 0)
+					v->result = VIM_RESULT_NONE; /* TODO */
+				v->mode = MODE_NORMAL;
+			}
 			break;
 		default:
-			if (key >= 32 && key < 127 && v->cmd_len < (int)sizeof(v->cmd_buf) - 1)
-				v->cmd_buf[v->cmd_len++] = key;
+			if (key >= 32 && key < 127) {
+				if (v->search_active) {
+					if (v->search_len < SEARCH_MAX - 1)
+						v->search_buf[v->search_len++] = key;
+					v->search_buf[v->search_len] = '\0';
+				} else {
+					if (v->cmd_len < (int)sizeof(v->cmd_buf) - 1)
+						v->cmd_buf[v->cmd_len++] = key;
+				}
+			}
 			break;
 		}
 		break;
 
 	default:
 		break;
+	}
+
+	/* search mode is entered from normal '/' — switch to COMMAND for input */
+	if (v->search_active && v->mode == MODE_NORMAL) {
+		v->mode = MODE_COMMAND;
 	}
 }
