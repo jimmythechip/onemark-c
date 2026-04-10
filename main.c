@@ -369,9 +369,19 @@ int main(int argc, char **argv)
 						plat_hide_cursor(); /* hide cursor */
 					}
 				} else {
-					focused_box = -1;
-					editing = 0;
-					plat_hide_cursor();
+					/* click on empty canvas — create a new box here */
+					if (file.box_count < MAX_BOXES) {
+						struct Box *nb = &file.boxes[file.box_count];
+						/* convert terminal cell back to pixel coords */
+						int px = (mouse.col + vp_col) * CELL_W;
+						int py = (mouse.row + vp_row) * CELL_H;
+						box_init_new(nb, px, py);
+						file.box_count++;
+						focused_box = file.box_count - 1;
+						editing = 1;
+						vim.mode = MODE_INSERT;
+						file.dirty = 1;
+					}
 				}
 				redraw();
 			}
