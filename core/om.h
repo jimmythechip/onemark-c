@@ -157,6 +157,8 @@ void plat_addch(char c, int attr);
 void plat_refresh(void);
 int  plat_rows(void);
 int  plat_cols(void);
+void plat_show_cursor(int row, int col);
+void plat_hide_cursor(void);
 /* Returns INPUT_KEY (key in *key), INPUT_MOUSE (*mouse filled),
  * INPUT_RESIZE, or INPUT_NONE (timeout). timeout_ms=0 for non-blocking. */
 int  plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms);

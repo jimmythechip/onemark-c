@@ -181,11 +181,8 @@ static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 	}
 
 	/* show cursor */
-	if (cursor_row >= 0) {
-		plat_move(cursor_row, cursor_col);
-		/* show hardware cursor */
-		printf("\033[?25h");
-	}
+	if (cursor_row >= 0)
+		plat_show_cursor(cursor_row, cursor_col);
 }
 
 static void draw_status(void)
@@ -221,7 +218,7 @@ static void draw_status(void)
 static void redraw(void)
 {
 	plat_clear();
-	printf("\033[?25l"); /* hide cursor during draw */
+	plat_hide_cursor(); /* hide cursor during draw */
 
 	for (int i = 0; i < file.box_count; i++) {
 		struct Box *b = &file.boxes[i];
@@ -369,12 +366,12 @@ int main(int argc, char **argv)
 					} else {
 						focused_box = hit;
 						editing = 0;
-						printf("\033[?25l"); /* hide cursor */
+						plat_hide_cursor(); /* hide cursor */
 					}
 				} else {
 					focused_box = -1;
 					editing = 0;
-					printf("\033[?25l");
+					plat_hide_cursor();
 				}
 				redraw();
 			}
@@ -394,13 +391,13 @@ int main(int argc, char **argv)
 				break;
 			case VIM_RESULT_QUIT:
 				editing = 0;
-				printf("\033[?25l");
+				plat_hide_cursor();
 				break;
 			case VIM_RESULT_SAVEQUIT:
 				file_save(&file);
 				file.dirty = 0;
 				editing = 0;
-				printf("\033[?25l");
+				plat_hide_cursor();
 				break;
 			case VIM_RESULT_NEWBOX:
 				if (file.box_count < MAX_BOXES) {
@@ -440,17 +437,17 @@ int main(int argc, char **argv)
 				file.dirty = 0;
 			} else if (vim.result == VIM_RESULT_QUIT) {
 				editing = 0;
-				printf("\033[?25l");
+				plat_hide_cursor();
 			} else if (vim.result == VIM_RESULT_SAVEQUIT) {
 				file_save(&file);
 				file.dirty = 0;
 				editing = 0;
-				printf("\033[?25l");
+				plat_hide_cursor();
 			}
 
 			if (vim.mode == MODE_NORMAL && key == KEY_ESC) {
 				editing = 0;
-				printf("\033[?25l");
+				plat_hide_cursor();
 			}
 
 			if (vim.result == VIM_RESULT_NONE && vim.mode == MODE_INSERT)

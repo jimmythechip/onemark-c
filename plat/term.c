@@ -1,112 +1,78 @@
-/* onemark — VT100/ANSI terminal platform backend
+/* onemark — VT100/ANSI terminal platform backend (termbox2)
  *
- * Raw termios setup, ANSI escape sequences, SGR mouse protocol.
- * Adapted from termtris (jtsiomb/termtris) patterns.
+ * Thin wrapper around termbox2, keeping the plat_* API unchanged
+ * so core code is unaffected. termbox2 handles termios, escape
+ * sequences, mouse protocols, SIGWINCH, and double-buffered
+ * screen updates (only redraws changed cells).
  */
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <signal.h>
-#include <termios.h>
-#include <sys/select.h>
-#include <sys/ioctl.h>
+#define TB_IMPL
+#include "../lib/termbox2.h"
 #include "../core/om.h"
 
-static struct termios saved_term;
-static int term_w = 80;
-static int term_h = 24;
-static volatile int resize_flag;
-
-static void sigwinch(int s)
-{
-	(void)s;
-	resize_flag = 1;
-	signal(SIGWINCH, sigwinch);
-}
-
-static void update_size(void)
-{
-	struct winsize ws;
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1 && ws.ws_col > 0) {
-		term_w = ws.ws_col;
-		term_h = ws.ws_row;
-	}
-}
+/* cursor position for streaming writes (plat_addstr advances this) */
+static int cur_x, cur_y;
 
 void plat_init(void)
 {
-	struct termios t;
-
-	tcgetattr(STDIN_FILENO, &saved_term);
-	t = saved_term;
-	t.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP | INLCR | IGNCR | ICRNL);
-	t.c_oflag &= ~OPOST;
-	t.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
-	t.c_cflag = (t.c_cflag & ~(CSIZE | PARENB)) | CS8;
-	t.c_cc[VMIN] = 0;
-	t.c_cc[VTIME] = 0;
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &t);
-
-	update_size();
-	signal(SIGWINCH, sigwinch);
-
-	/* enable SGR mouse tracking (press + release, exact coords) */
-	fputs("\033[?1006h\033[?1000h", stdout);
-	/* hide cursor initially */
-	fputs("\033[?25l", stdout);
-	/* alternate screen buffer */
-	fputs("\033[?1049h", stdout);
-	fflush(stdout);
+	tb_init();
+	tb_set_input_mode(TB_INPUT_ESC | TB_INPUT_MOUSE);
+	tb_set_output_mode(TB_OUTPUT_NORMAL);
+	tb_hide_cursor();
+	cur_x = 0;
+	cur_y = 0;
 }
 
 void plat_deinit(void)
 {
-	/* disable mouse, show cursor, restore main screen */
-	fputs("\033[?1000l\033[?1006l", stdout);
-	fputs("\033[?25h", stdout);
-	fputs("\033[?1049l", stdout);
-	fputs("\033[0m", stdout);
-	fflush(stdout);
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &saved_term);
+	tb_shutdown();
 }
 
 void plat_clear(void)
 {
-	fputs("\033[H\033[2J", stdout);
+	tb_clear();
+	cur_x = 0;
+	cur_y = 0;
 }
 
 void plat_move(int row, int col)
 {
-	if ((row | col) == 0)
-		fputs("\033[H", stdout);
-	else
-		printf("\033[%d;%dH", row + 1, col + 1);
+	cur_y = row;
+	cur_x = col;
+}
+
+static uintattr_t map_fg(int attr)
+{
+	uintattr_t fg = TB_DEFAULT;
+	if (attr & ATTR_BOLD)    fg |= TB_BOLD;
+	if (attr & ATTR_REVERSE) fg |= TB_REVERSE;
+	if (attr & ATTR_DIM)     fg |= TB_DIM;
+
+	int color = ATTR_FG(attr);
+	switch (color) {
+	case COL_BLACK:   fg |= TB_BLACK; break;
+	case COL_RED:     fg |= TB_RED; break;
+	case COL_GREEN:   fg |= TB_GREEN; break;
+	case COL_YELLOW:  fg |= TB_YELLOW; break;
+	case COL_BLUE:    fg |= TB_BLUE; break;
+	case COL_MAGENTA: fg |= TB_MAGENTA; break;
+	case COL_CYAN:    fg |= TB_CYAN; break;
+	case COL_WHITE:   fg |= TB_WHITE; break;
+	}
+	return fg;
 }
 
 void plat_addstr(const char *s, int len, int attr)
 {
-	int bold = attr & ATTR_BOLD;
-	int rev  = attr & ATTR_REVERSE;
-	int dim  = attr & ATTR_DIM;
-	int fg   = ATTR_FG(attr);
+	uintattr_t fg = map_fg(attr);
+	int w = tb_width();
+	int h = tb_height();
+	int n = (len < 0) ? (int)strlen(s) : len;
 
-	if (bold || rev || dim || fg) {
-		fputs("\033[0", stdout);
-		if (bold) fputs(";1", stdout);
-		if (dim)  fputs(";2", stdout);
-		if (rev)  fputs(";7", stdout);
-		if (fg)   printf(";%d", 30 + fg);
-		fputc('m', stdout);
+	for (int i = 0; i < n; i++) {
+		if (cur_x >= 0 && cur_x < w && cur_y >= 0 && cur_y < h)
+			tb_set_cell(cur_x, cur_y, (uint32_t)(unsigned char)s[i], fg, TB_DEFAULT);
+		cur_x++;
 	}
-
-	if (len < 0)
-		fputs(s, stdout);
-	else
-		fwrite(s, 1, len, stdout);
-
-	if (bold || rev || dim || fg)
-		fputs("\033[0m", stdout);
 }
 
 void plat_addch(char c, int attr)
@@ -116,139 +82,84 @@ void plat_addch(char c, int attr)
 
 void plat_refresh(void)
 {
-	fflush(stdout);
+	tb_present();
 }
 
-int plat_rows(void) { return term_h; }
-int plat_cols(void) { return term_w; }
+int plat_rows(void) { return tb_height(); }
+int plat_cols(void) { return tb_width(); }
 
-/* Parse an SGR mouse sequence: \033[<btn;col;rowM or m */
-static int parse_mouse(const char *buf, int len, struct MouseEvent *m)
+void plat_show_cursor(int row, int col)
 {
-	int btn, col, row, i;
-	char trail;
+	tb_set_cursor(col, row); /* termbox2 uses (x,y) */
+}
 
-	if (len < 6 || buf[0] != '\033' || buf[1] != '[' || buf[2] != '<')
+void plat_hide_cursor(void)
+{
+	tb_hide_cursor();
+}
+
+/* Map termbox2 key codes to our KEY_* constants */
+static int map_key(uint16_t tbkey)
+{
+	switch (tbkey) {
+	case TB_KEY_ARROW_UP:    return KEY_UP;
+	case TB_KEY_ARROW_DOWN:  return KEY_DOWN;
+	case TB_KEY_ARROW_LEFT:  return KEY_LEFT;
+	case TB_KEY_ARROW_RIGHT: return KEY_RIGHT;
+	case TB_KEY_HOME:        return KEY_HOME;
+	case TB_KEY_END:         return KEY_END;
+	case TB_KEY_PGUP:        return KEY_PGUP;
+	case TB_KEY_PGDN:        return KEY_PGDN;
+	case TB_KEY_DELETE:       return KEY_DEL;
+	case TB_KEY_BACKSPACE2:  return KEY_BACKSPACE;
+	case TB_KEY_BACKSPACE:   return KEY_BACKSPACE;
+	case TB_KEY_ENTER:       return '\n';
+	case TB_KEY_ESC:         return KEY_ESC;
+	default:
+		/* ctrl keys: TB_KEY_CTRL_A = 0x01, etc. */
+		if (tbkey >= 0x01 && tbkey <= 0x1a)
+			return tbkey; /* matches KEY_CTRL(c) */
 		return 0;
-
-	i = 3;
-	btn = 0;
-	while (i < len && buf[i] >= '0' && buf[i] <= '9')
-		btn = btn * 10 + (buf[i++] - '0');
-	if (i >= len || buf[i] != ';') return 0;
-	i++;
-
-	col = 0;
-	while (i < len && buf[i] >= '0' && buf[i] <= '9')
-		col = col * 10 + (buf[i++] - '0');
-	if (i >= len || buf[i] != ';') return 0;
-	i++;
-
-	row = 0;
-	while (i < len && buf[i] >= '0' && buf[i] <= '9')
-		row = row * 10 + (buf[i++] - '0');
-	if (i >= len) return 0;
-
-	trail = buf[i];
-	if (trail != 'M' && trail != 'm') return 0;
-
-	m->button = btn & 3;  /* 0=left, 1=middle, 2=right */
-	m->col = col - 1;     /* 1-based → 0-based */
-	m->row = row - 1;
-	m->pressed = (trail == 'M');
-	return i + 1;  /* bytes consumed */
-}
-
-/* Parse an escape sequence for special keys */
-static int parse_escape(const char *buf, int len, int *key)
-{
-	if (len < 2) return 0;
-
-	if (buf[1] == '[') {
-		if (len < 3) return 0;
-		switch (buf[2]) {
-		case 'A': *key = KEY_UP;    return 3;
-		case 'B': *key = KEY_DOWN;  return 3;
-		case 'C': *key = KEY_RIGHT; return 3;
-		case 'D': *key = KEY_LEFT;  return 3;
-		case 'H': *key = KEY_HOME;  return 3;
-		case 'F': *key = KEY_END;   return 3;
-		case '3':
-			if (len >= 4 && buf[3] == '~') { *key = KEY_DEL; return 4; }
-			return 0;
-		case '5':
-			if (len >= 4 && buf[3] == '~') { *key = KEY_PGUP; return 4; }
-			return 0;
-		case '6':
-			if (len >= 4 && buf[3] == '~') { *key = KEY_PGDN; return 4; }
-			return 0;
-		case '<':
-			/* could be mouse — handled separately */
-			return 0;
-		}
 	}
-	return 0;
 }
 
 int plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms)
 {
-	fd_set fds;
-	struct timeval tv;
-	static char buf[64];
-	static int buf_len;
-	int rd, consumed;
+	struct tb_event ev;
+	int rv = tb_peek_event(&ev, timeout_ms);
 
-	/* check for pending resize */
-	if (resize_flag) {
-		resize_flag = 0;
-		update_size();
-		return INPUT_RESIZE;
-	}
-
-	/* try to read more data */
-	FD_ZERO(&fds);
-	FD_SET(STDIN_FILENO, &fds);
-	tv.tv_sec = timeout_ms / 1000;
-	tv.tv_usec = (timeout_ms % 1000) * 1000;
-
-	if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
-		rd = read(STDIN_FILENO, buf + buf_len, sizeof(buf) - buf_len);
-		if (rd > 0)
-			buf_len += rd;
-	}
-
-	if (buf_len == 0)
+	if (rv == TB_ERR_NO_EVENT || rv == TB_ERR_POLL)
+		return INPUT_NONE;
+	if (rv < 0)
 		return INPUT_NONE;
 
-	/* try mouse first */
-	consumed = parse_mouse(buf, buf_len, mouse);
-	if (consumed > 0) {
-		buf_len -= consumed;
-		if (buf_len > 0) memmove(buf, buf + consumed, buf_len);
+	switch (ev.type) {
+	case TB_EVENT_KEY:
+		if (ev.ch) {
+			*key = (int)ev.ch;
+		} else {
+			*key = map_key(ev.key);
+			if (*key == 0) return INPUT_NONE;
+		}
+		return INPUT_KEY;
+
+	case TB_EVENT_MOUSE:
+		mouse->col = ev.x;
+		mouse->row = ev.y;
+		mouse->pressed = 1;
+		switch (ev.key) {
+		case TB_KEY_MOUSE_LEFT:       mouse->button = 0; break;
+		case TB_KEY_MOUSE_MIDDLE:     mouse->button = 1; break;
+		case TB_KEY_MOUSE_RIGHT:      mouse->button = 2; break;
+		case TB_KEY_MOUSE_RELEASE:    mouse->button = 0; mouse->pressed = 0; break;
+		case TB_KEY_MOUSE_WHEEL_UP:   mouse->button = 3; break;
+		case TB_KEY_MOUSE_WHEEL_DOWN: mouse->button = 4; break;
+		default: mouse->button = 0; break;
+		}
 		return INPUT_MOUSE;
-	}
 
-	/* try escape sequence */
-	if (buf[0] == '\033' && buf_len > 1) {
-		consumed = parse_escape(buf, buf_len, key);
-		if (consumed > 0) {
-			buf_len -= consumed;
-			if (buf_len > 0) memmove(buf, buf + consumed, buf_len);
-			return INPUT_KEY;
-		}
-		/* lone escape or unrecognised — wait briefly for more bytes */
-		if (buf_len == 1) {
-			/* lone Escape — return it as KEY_ESC */
-			*key = KEY_ESC;
-			buf_len = 0;
-			return INPUT_KEY;
-		}
+	case TB_EVENT_RESIZE:
+		return INPUT_RESIZE;
 	}
-
-	/* plain byte */
-	*key = (unsigned char)buf[0];
-	if (*key == 127) *key = KEY_BACKSPACE;
-	buf_len--;
-	if (buf_len > 0) memmove(buf, buf + 1, buf_len);
-	return INPUT_KEY;
+	return INPUT_NONE;
 }
