@@ -264,8 +264,10 @@ int file_parse(struct NotebookFile *f, const char *path)
 				body_buf[body_len] = '\0';
 				promote_headings(body_buf);
 				gap_init(&cur->body, body_buf, strlen(body_buf));
+				undo_init(&cur->undo);
 			} else if (cur) {
 				gap_init(&cur->body, "", 0);
+				undo_init(&cur->undo);
 			}
 
 			if (f->box_count >= MAX_BOXES) continue;
@@ -323,8 +325,10 @@ int file_parse(struct NotebookFile *f, const char *path)
 		body_buf[body_len] = '\0';
 		promote_headings(body_buf);
 		gap_init(&cur->body, body_buf, strlen(body_buf));
+		undo_init(&cur->undo);
 	} else if (cur && cur->body.buf == NULL) {
 		gap_init(&cur->body, "", 0);
+		undo_init(&cur->undo);
 	}
 
 	/* fill in missing IDs and timestamps */
@@ -456,4 +460,5 @@ void box_init_new(struct Box *b, int x, int y)
 	b->x = x; b->y = y;
 	b->w = 320; b->h = 180;
 	gap_init(&b->body, "", 0);
+	undo_init(&b->undo);
 }

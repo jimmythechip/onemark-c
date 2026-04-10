@@ -72,7 +72,8 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int is_f
 	int inner_w = w - 2;
 	int inner_h = h - 2;
 	int rows = plat_rows();
-	int title_attr = ATTR_BOLD;
+	/* focused (not editing): reverse title to show it's selected */
+	int title_attr = is_focused ? (ATTR_BOLD | ATTR_REVERSE) : ATTR_BOLD;
 
 	if (inner_w <= 0 || inner_h <= 0) return;
 
@@ -82,9 +83,8 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int is_f
 		if (tlen > inner_w) tlen = inner_w;
 		plat_move(r + 1, c + 1);
 		plat_addstr(b->title, tlen, title_attr);
-		/* pad */
 		for (int x = tlen; x < inner_w; x++)
-			plat_addch(' ', 0);
+			plat_addch(' ', title_attr);
 	}
 
 	/* body lines */
@@ -366,13 +366,12 @@ int main(int argc, char **argv)
 					} else {
 						focused_box = hit;
 						editing = 0;
-						plat_hide_cursor(); /* hide cursor */
+						plat_hide_cursor();
 					}
 				} else {
 					/* click on empty canvas — create a new box here */
 					if (file.box_count < MAX_BOXES) {
 						struct Box *nb = &file.boxes[file.box_count];
-						/* convert terminal cell back to pixel coords */
 						int px = (mouse.col + vp_col) * CELL_W;
 						int py = (mouse.row + vp_row) * CELL_H;
 						box_init_new(nb, px, py);
@@ -383,8 +382,9 @@ int main(int argc, char **argv)
 						file.dirty = 1;
 					}
 				}
-				redraw();
 			}
+			/* always redraw on any mouse event (fixes drag traces) */
+			redraw();
 			continue;
 		}
 

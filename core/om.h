@@ -49,6 +49,26 @@ char  gap_char_at(const struct GapBuf *g, int pos);
 /* Copy content to a null-terminated string. Caller frees. */
 char *gap_contents(const struct GapBuf *g);
 
+/* --- undo ring ----------------------------------------------------------- */
+#define UNDO_MAX 100
+
+struct UndoEntry {
+	char *text;       /* snapshot of buffer content (malloc'd) */
+	int   cursor;     /* cursor position at snapshot time */
+};
+
+struct UndoRing {
+	struct UndoEntry entries[UNDO_MAX];
+	int current;      /* index of "now" (-1 = nothing saved) */
+	int count;        /* number of valid entries */
+};
+
+void undo_init(struct UndoRing *u);
+void undo_free(struct UndoRing *u);
+void undo_push(struct UndoRing *u, struct GapBuf *buf);
+int  undo_undo(struct UndoRing *u, struct GapBuf *buf);
+int  undo_redo(struct UndoRing *u, struct GapBuf *buf);
+
 /* --- custom fields ------------------------------------------------------- */
 #define MAX_CUSTOM_FIELDS 16
 
@@ -64,6 +84,7 @@ struct Box {
 	char id[ID_LEN + 1];
 	char *title;
 	struct GapBuf body;
+	struct UndoRing undo;
 	int x, y, w, h;          /* pixel coordinates (Electron compat) */
 	char created[32];
 	char modified[32];
@@ -93,6 +114,13 @@ struct NotebookFile {
 	int dirty;
 };
 
+/* --- yank register ------------------------------------------------------- */
+struct YankReg {
+	char *text;
+	int   len;
+	int   linewise;   /* 1 if yanked whole lines (dd, yy, V) */
+};
+
 /* --- vim state ----------------------------------------------------------- */
 enum VimMode {
 	MODE_NORMAL,
@@ -109,15 +137,18 @@ enum VimMode {
 #define VIM_RESULT_QUIT    2
 #define VIM_RESULT_SAVEQUIT 3
 #define VIM_RESULT_NEWBOX  4
+#define VIM_RESULT_DELBOX  5
+#define VIM_RESULT_DUPBOX  6
 
 struct VimState {
 	enum VimMode mode;
-	int  op;          /* pending operator char: 'd', 'y', 'c', 0 */
-	int  count;       /* numeric prefix */
-	int  count2;      /* second count (between op and motion) */
-	char cmd_buf[256]; /* ex command line buffer */
+	int  op;            /* pending operator: 'd', 'y', 'c', '>', '<', 0 */
+	int  count;         /* numeric prefix */
+	int  pending_g;     /* waiting for second key after 'g' */
+	char cmd_buf[256];  /* ex command line buffer */
 	int  cmd_len;
-	int  result;      /* set by vim_keypress */
+	int  result;        /* set by vim_keypress */
+	struct YankReg yank; /* unnamed yank register */
 };
 
 /* --- mouse event --------------------------------------------------------- */
