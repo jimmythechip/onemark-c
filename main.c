@@ -24,6 +24,11 @@ static int editing = 0;      /* 1 = editing box body (vim active) */
 static int running = 1;
 static int leader_pending = 0; /* waiting for key after leader */
 
+/* mouse drag state */
+static int dragging = 0;     /* 1 = dragging a box, 2 = resizing */
+static int drag_box = -1;    /* which box is being dragged */
+static int drag_ox, drag_oy; /* offset from box origin to mouse at drag start */
+
 /* cross-box state */
 static struct Mark marks[26]; /* a-z */
 static struct JumpHistory jumphist;
@@ -346,6 +351,31 @@ static void focus_box(int idx)
 	}
 }
 
+/* --- mouse hit zones ----------------------------------------------------- */
+
+/* Returns: 0 = interior, 1 = border (drag), 2 = right edge (resize) */
+static int hit_zone(int box_idx, int row, int col)
+{
+	struct Box *b = &file.boxes[box_idx];
+	int r = px_to_row(b->y) - vp_row;
+	int c = px_to_col(b->x) - vp_col;
+	int w = px_to_col(b->w);
+	int h = px_to_row(b->h);
+	if (w < 6) w = 6;
+	if (h < 4) h = 4;
+
+	/* right edge: last 2 columns of box */
+	if (col >= c + w - 2 && col <= c + w - 1)
+		return 2;
+	/* top/bottom border */
+	if (row == r || row == r + h - 1)
+		return 1;
+	/* left border */
+	if (col == c)
+		return 1;
+	return 0;
+}
+
 /* --- navigation ---------------------------------------------------------- */
 
 /* Simple reading order: sort by y then x */
@@ -440,17 +470,42 @@ int main(int argc, char **argv)
 
 		if (result == INPUT_MOUSE) {
 			if (mouse.pressed && mouse.button == 0) {
+				if (dragging) {
+					/* already dragging — update position */
+					goto do_drag;
+				}
 				int hit = box_at_cell(mouse.row, mouse.col);
 				if (hit >= 0) {
-					if (hit == focused_box && editing) {
-						/* click inside editing box — TODO: place cursor */
-					} else {
+					int zone = hit_zone(hit, mouse.row, mouse.col);
+					if (zone == 2) {
+						/* right edge → start resize */
+						dragging = 2;
+						drag_box = hit;
 						focused_box = hit;
 						editing = 0;
 						plat_hide_cursor();
+					} else if (zone == 1) {
+						/* border → start drag */
+						dragging = 1;
+						drag_box = hit;
+						focused_box = hit;
+						editing = 0;
+						plat_hide_cursor();
+						struct Box *b = &file.boxes[hit];
+						drag_ox = mouse.col - (px_to_col(b->x) - vp_col);
+						drag_oy = mouse.row - (px_to_row(b->y) - vp_row);
+					} else {
+						/* interior → focus (or edit if already focused) */
+						if (hit == focused_box && editing) {
+							/* click inside editing box — TODO: place cursor */
+						} else {
+							focused_box = hit;
+							editing = 0;
+							plat_hide_cursor();
+						}
 					}
 				} else {
-					/* click on empty canvas — create a new box here */
+					/* click on empty canvas → create box */
 					if (file.box_count < MAX_BOXES) {
 						struct Box *nb = &file.boxes[file.box_count];
 						int px = (mouse.col + vp_col) * cfg_cell_w;
@@ -463,8 +518,32 @@ int main(int argc, char **argv)
 						file.dirty = 1;
 					}
 				}
+			} else if (!mouse.pressed && dragging) {
+				/* mouse release → end drag/resize */
+				dragging = 0;
+				drag_box = -1;
+				file.dirty = 1;
+			} else if (mouse.pressed && dragging) {
+do_drag:
+				if (drag_box >= 0 && drag_box < file.box_count) {
+					struct Box *b = &file.boxes[drag_box];
+					if (dragging == 1) {
+						/* move: set box position from mouse - offset */
+						int new_col = mouse.col - drag_ox + vp_col;
+						int new_row = mouse.row - drag_oy + vp_row;
+						if (new_col < 0) new_col = 0;
+						if (new_row < 0) new_row = 0;
+						b->x = new_col * cfg_cell_w;
+						b->y = new_row * cfg_cell_h;
+					} else if (dragging == 2) {
+						/* resize: right edge follows mouse */
+						int box_col = px_to_col(b->x) - vp_col;
+						int new_w = mouse.col - box_col + 1;
+						if (new_w < 6) new_w = 6;
+						b->w = new_w * cfg_cell_w;
+					}
+				}
 			}
-			/* always redraw on any mouse event (fixes drag traces) */
 			redraw();
 			continue;
 		}
