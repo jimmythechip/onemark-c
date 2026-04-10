@@ -42,22 +42,11 @@ void plat_move(int row, int col)
 
 static uintattr_t map_fg(int attr)
 {
-	uintattr_t fg = TB_DEFAULT;
+	/* White on black for everything — colors deferred to later */
+	uintattr_t fg = TB_WHITE;
 	if (attr & ATTR_BOLD)    fg |= TB_BOLD;
 	if (attr & ATTR_REVERSE) fg |= TB_REVERSE;
-	if (attr & ATTR_DIM)     fg |= TB_DIM;
-
-	int color = ATTR_FG(attr);
-	switch (color) {
-	case COL_BLACK:   fg |= TB_BLACK; break;
-	case COL_RED:     fg |= TB_RED; break;
-	case COL_GREEN:   fg |= TB_GREEN; break;
-	case COL_YELLOW:  fg |= TB_YELLOW; break;
-	case COL_BLUE:    fg |= TB_BLUE; break;
-	case COL_MAGENTA: fg |= TB_MAGENTA; break;
-	case COL_CYAN:    fg |= TB_CYAN; break;
-	case COL_WHITE:   fg |= TB_WHITE; break;
-	}
+	if (attr & ATTR_DIM)     fg = TB_DEFAULT; /* dim = terminal default (grey) */
 	return fg;
 }
 
