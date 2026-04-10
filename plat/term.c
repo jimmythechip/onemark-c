@@ -24,6 +24,9 @@ void plat_init(void)
 
 void plat_deinit(void)
 {
+	/* restore default cursor style before shutdown */
+	tb_send("\033[0 q", 5);
+	tb_present();
 	tb_shutdown();
 }
 
@@ -95,6 +98,17 @@ void plat_show_cursor(int row, int col)
 void plat_hide_cursor(void)
 {
 	tb_hide_cursor();
+}
+
+void plat_cursor_style(int style)
+{
+	/* DECSCUSR: CSI Ps SP q — cursor shape.
+	 * 1=blinking block, 2=steady block, 5=blinking bar, 6=steady bar.
+	 * Supported since xterm 282, Windows Terminal, gnome-terminal,
+	 * and VT520+ hardware terminals. */
+	char buf[8];
+	int n = snprintf(buf, sizeof buf, "\033[%d q", style);
+	tb_send(buf, n);
 }
 
 /* Map termbox2 key codes to our KEY_* constants */

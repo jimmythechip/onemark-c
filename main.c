@@ -29,6 +29,12 @@ static int dragging = 0;     /* 1 = dragging a box, 2 = resizing */
 static int drag_box = -1;    /* which box is being dragged */
 static int drag_ox, drag_oy; /* offset from box origin to mouse at drag start */
 
+/* title editing state */
+static int editing_title = 0;
+static char title_buf[256];
+static int title_len;
+static int title_cursor;
+
 /* cross-box state */
 static struct Mark marks[26]; /* a-z */
 static struct JumpHistory jumphist;
@@ -150,9 +156,21 @@ static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 
 	/* title */
 	if (r + 1 >= 0 && r + 1 < rows - 1) {
+		plat_move(r + 1, c + 1);
+		if (editing_title && focused_box >= 0 && b == &file.boxes[focused_box]) {
+			/* editing title: show title_buf with cursor */
+			int tlen = title_len;
+			if (tlen > inner_w) tlen = inner_w;
+			plat_addstr(title_buf, tlen, ATTR_BOLD | ATTR_REVERSE);
+			for (int x = tlen; x < inner_w; x++)
+				plat_addch(' ', ATTR_REVERSE);
+			int tc = title_cursor < inner_w ? title_cursor : inner_w - 1;
+			plat_show_cursor(r + 1, c + 1 + tc);
+			plat_cursor_style(5); /* bar cursor for title edit */
+			return; /* don't draw body while editing title */
+		}
 		int tlen = strlen(b->title);
 		if (tlen > inner_w) tlen = inner_w;
-		plat_move(r + 1, c + 1);
 		plat_addstr(b->title, tlen, ATTR_BOLD | ATTR_REVERSE);
 		for (int x = tlen; x < inner_w; x++)
 			plat_addch(' ', ATTR_REVERSE);
@@ -233,6 +251,11 @@ static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 		cursor_col = c + 1;
 	}
 	plat_show_cursor(cursor_row, cursor_col);
+	/* vim cursor style: block in NORMAL, bar in INSERT */
+	if (vim.mode == MODE_INSERT)
+		plat_cursor_style(5); /* blinking bar */
+	else
+		plat_cursor_style(1); /* blinking block */
 }
 
 static void draw_status(void)
@@ -440,7 +463,7 @@ static void focus_box(int idx)
 
 /* --- mouse hit zones ----------------------------------------------------- */
 
-/* Returns: 0 = interior, 1 = border (drag), 2 = right edge (resize) */
+/* Returns: 0 = body, 1 = border (drag), 2 = right edge (resize), 3 = title (drag) */
 static int hit_zone(int box_idx, int row, int col)
 {
 	struct Box *b = &file.boxes[box_idx];
@@ -460,6 +483,9 @@ static int hit_zone(int box_idx, int row, int col)
 	/* left border */
 	if (col == c)
 		return 1;
+	/* title row (r + 1) — draggable */
+	if (row == r + 1)
+		return 3;
 	return 0;
 }
 
@@ -568,22 +594,25 @@ int main(int argc, char **argv)
 						/* right edge → start resize */
 						dragging = 2;
 						drag_box = hit;
-						focused_box = hit;
-						editing = 0;
-						plat_hide_cursor();
-					} else if (zone == 1) {
-						/* border → start drag */
+						focus_box(hit);
+					} else if (zone == 3 && hit == focused_box && !dragging) {
+						/* title of focused box → edit title */
+						editing_title = 1;
+						struct Box *tb = &file.boxes[hit];
+						title_len = snprintf(title_buf, sizeof title_buf, "%s", tb->title);
+						title_cursor = title_len;
+					} else if (zone == 1 || zone == 3) {
+						/* border or title of unfocused box → drag */
 						dragging = 1;
 						drag_box = hit;
-						focused_box = hit;
-						editing = 0;
-						plat_hide_cursor();
+						focus_box(hit);
 						struct Box *b = &file.boxes[hit];
 						drag_ox = mouse.col - (px_to_col(b->x) - vp_col);
 						drag_oy = mouse.row - (px_to_row(b->y) - vp_row);
 					} else {
-						/* interior → focus box, enter NORMAL */
+						/* body interior → focus box */
 						focus_box(hit);
+						editing_title = 0;
 					}
 				} else {
 					/* click on empty canvas → create box */
@@ -679,6 +708,56 @@ do_drag:
 			if (vim.mode == MODE_NORMAL)
 				editing = (focused_box >= 0) ? editing : 0;
 
+			redraw();
+			continue;
+		}
+
+		/* --- title editing mode --- */
+		if (editing_title && focused_box >= 0) {
+			switch (key) {
+			case KEY_ESC:
+			case '\r':
+			case '\n':
+				/* commit title */
+				title_buf[title_len] = '\0';
+				free(file.boxes[focused_box].title);
+				file.boxes[focused_box].title = strdup(title_buf);
+				file.boxes[focused_box].title_is_default = 0;
+				editing_title = 0;
+				file.dirty = 1;
+				break;
+			case KEY_BACKSPACE:
+				if (title_cursor > 0) {
+					memmove(title_buf + title_cursor - 1,
+						title_buf + title_cursor,
+						title_len - title_cursor);
+					title_cursor--;
+					title_len--;
+				}
+				break;
+			case KEY_LEFT:
+				if (title_cursor > 0) title_cursor--;
+				break;
+			case KEY_RIGHT:
+				if (title_cursor < title_len) title_cursor++;
+				break;
+			case KEY_HOME:
+				title_cursor = 0;
+				break;
+			case KEY_END:
+				title_cursor = title_len;
+				break;
+			default:
+				if (key >= 32 && key < 127 && title_len < (int)sizeof(title_buf) - 1) {
+					memmove(title_buf + title_cursor + 1,
+						title_buf + title_cursor,
+						title_len - title_cursor);
+					title_buf[title_cursor] = key;
+					title_cursor++;
+					title_len++;
+				}
+				break;
+			}
 			redraw();
 			continue;
 		}

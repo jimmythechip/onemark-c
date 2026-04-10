@@ -232,6 +232,8 @@ int  plat_rows(void);
 int  plat_cols(void);
 void plat_show_cursor(int row, int col);
 void plat_hide_cursor(void);
+/* Cursor style: 1=blinking block, 2=steady block, 5=blinking bar, 6=steady bar */
+void plat_cursor_style(int style);
 /* Returns INPUT_KEY (key in *key), INPUT_MOUSE (*mouse filled),
  * INPUT_RESIZE, or INPUT_NONE (timeout). timeout_ms=0 for non-blocking. */
 int  plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms);
