@@ -103,6 +103,13 @@ enum VimMode {
 	MODE_COMMAND
 };
 
+/* vim result codes (set after vim_keypress) */
+#define VIM_RESULT_NONE    0
+#define VIM_RESULT_SAVE    1
+#define VIM_RESULT_QUIT    2
+#define VIM_RESULT_SAVEQUIT 3
+#define VIM_RESULT_NEWBOX  4
+
 struct VimState {
 	enum VimMode mode;
 	int  op;          /* pending operator char: 'd', 'y', 'c', 0 */
@@ -110,6 +117,7 @@ struct VimState {
 	int  count2;      /* second count (between op and motion) */
 	char cmd_buf[256]; /* ex command line buffer */
 	int  cmd_len;
+	int  result;      /* set by vim_keypress */
 };
 
 /* --- mouse event --------------------------------------------------------- */
@@ -161,5 +169,8 @@ int  file_save(const struct NotebookFile *f);
 /* --- vim engine ---------------------------------------------------------- */
 void vim_init(struct VimState *v);
 void vim_keypress(struct VimState *v, struct GapBuf *buf, int key);
+
+/* --- box helpers --------------------------------------------------------- */
+void box_init_new(struct Box *b, int x, int y);
 
 #endif /* OM_H */
