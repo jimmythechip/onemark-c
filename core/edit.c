@@ -125,7 +125,7 @@ int edit_checkbox_rotate(struct GapBuf *buf, struct UndoRing *undo, int pos)
 		strcpy(newline + indent + 6, rest + 6);
 	} else if (rlen >= 2 && rest[0] == '-' && rest[1] == ' ') {
 		/* bullet → unchecked */
-		newline = malloc(indent + 4 + rlen - 2 + 1);
+		newline = malloc(indent + 6 + (rlen - 2) + 1);
 		memcpy(newline, line, indent);
 		memcpy(newline + indent, "- [ ] ", 6);
 		strcpy(newline + indent + 6, rest + 2);

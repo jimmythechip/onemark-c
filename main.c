@@ -70,13 +70,13 @@ static void draw_box_border(int r, int c, int w, int h, int focused, enum Tag ta
 	}
 }
 
-static void draw_box_content(struct Box *b, int r, int c, int w, int h, int is_focused)
+static void draw_box_content(struct Box *b, int r, int c, int w, int h, int focused)
 {
 	int inner_w = w - 2;
 	int inner_h = h - 2;
 	int rows = plat_rows();
 	/* focused (not editing): reverse title to show it's selected */
-	int title_attr = is_focused ? (ATTR_BOLD | ATTR_REVERSE) : ATTR_BOLD;
+	int title_attr = focused ? (ATTR_BOLD | ATTR_REVERSE) : ATTR_BOLD;
 
 	if (inner_w <= 0 || inner_h <= 0) return;
 
@@ -123,7 +123,6 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int is_f
 		line_idx++;
 	}
 	free(content);
-	(void)is_focused;
 }
 
 static void draw_editing_box(struct Box *b, int r, int c, int w, int h)

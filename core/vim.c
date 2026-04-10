@@ -218,7 +218,8 @@ static struct Range motion_range(struct GapBuf *buf, int pos, int key, int count
 	else { r.from = pos; r.to = newpos; }
 
 	if (key == 'j' || key == 'k') r.linewise = 1;
-	if (key == '$' && r.to < len) r.to++;
+	/* NOTE: $ range extension for operators is handled in OP_PENDING,
+	 * not here. motion_range returns the raw cursor position. */
 
 	return r;
 }
@@ -240,6 +241,7 @@ static void yank_range(struct VimState *v, struct GapBuf *buf, int from, int to,
 	if (n <= 0) return;
 	free(v->yank.text);
 	v->yank.text = malloc(n + 1);
+	if (!v->yank.text) { v->yank.len = 0; return; }
 	for (int i = 0; i < n; i++)
 		v->yank.text[i] = gap_char_at(buf, from + i);
 	v->yank.text[n] = '\0';
@@ -708,8 +710,7 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf,
 			int from = v->visual_start;
 			int to = buf->gap_start;
 			if (from > to) { int t = from; from = to; to = t; }
-			to++; /* visual is inclusive */
-			if (to > len) to = len;
+			if (to < len) to++; /* visual is inclusive */
 
 			struct Range r = { from, to, v->mode == MODE_VLINE };
 			v->op = key;

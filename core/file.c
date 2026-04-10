@@ -17,6 +17,7 @@ static char *xstrdup(const char *s)
 	char *d;
 	if (!s) return NULL;
 	d = malloc(strlen(s) + 1);
+	if (!d) return NULL;
 	strcpy(d, s);
 	return d;
 }
@@ -53,7 +54,8 @@ static char *json_unescape(const char *s)
 	if (len < 2 || s[0] != '"' || s[len-1] != '"')
 		return xstrdup(s);
 
-	out = malloc(len);
+	out = malloc(len); /* always >= needed: len includes quotes we remove */
+	if (!out) return xstrdup(s);
 	p = out;
 	for (int i = 1; i < len - 1; i++) {
 		if (s[i] == '\\' && i + 1 < len - 1) {

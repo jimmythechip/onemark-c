@@ -148,7 +148,6 @@ enum VimResult {
 	VIM_RESULT_ZQ,
 };
 
-#define REPEAT_MAX 256
 #define SEARCH_MAX 128
 
 struct VimState {
@@ -156,7 +155,6 @@ struct VimState {
 	int  op;            /* pending operator: 'd', 'y', 'c', '>', '<', 0 */
 	int  count;         /* numeric prefix */
 	int  pending_g;     /* waiting for second key after 'g' */
-	int  pending_char;  /* waiting for char argument (f/t/r/m/') */
 	char cmd_buf[256];  /* ex command line buffer */
 	int  cmd_len;
 	enum VimResult result;
