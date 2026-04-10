@@ -132,13 +132,21 @@ enum VimMode {
 };
 
 /* vim result codes (set after vim_keypress) */
-#define VIM_RESULT_NONE    0
-#define VIM_RESULT_SAVE    1
-#define VIM_RESULT_QUIT    2
-#define VIM_RESULT_SAVEQUIT 3
-#define VIM_RESULT_NEWBOX  4
-#define VIM_RESULT_DELBOX  5
-#define VIM_RESULT_DUPBOX  6
+enum VimResult {
+	VIM_RESULT_NONE = 0,
+	VIM_RESULT_SAVE,
+	VIM_RESULT_QUIT,
+	VIM_RESULT_SAVEQUIT,
+	VIM_RESULT_NEWBOX,
+	VIM_RESULT_DELBOX,
+	VIM_RESULT_DUPBOX,
+	VIM_RESULT_SET_MARK,   /* mark_letter set */
+	VIM_RESULT_JUMP_MARK,  /* mark_letter set */
+	VIM_RESULT_SET_FIELD,  /* cmd_buf has "key value" */
+	VIM_RESULT_SET_TAG,    /* cmd_buf has tag name */
+	VIM_RESULT_ZZ,
+	VIM_RESULT_ZQ,
+};
 
 #define REPEAT_MAX 256
 #define SEARCH_MAX 128
@@ -151,21 +159,20 @@ struct VimState {
 	int  pending_char;  /* waiting for char argument (f/t/r/m/') */
 	char cmd_buf[256];  /* ex command line buffer */
 	int  cmd_len;
-	int  result;        /* set by vim_keypress */
-	struct YankReg yank; /* unnamed yank register */
+	enum VimResult result;
+	struct YankReg yank;
 	/* visual mode */
-	int  visual_start;  /* anchor position for visual selection */
+	int  visual_start;
 	/* search */
 	char search_buf[SEARCH_MAX];
 	int  search_len;
-	int  search_active; /* 1 = in search input mode */
-	/* repeat */
-	int  last_keys[REPEAT_MAX];
-	int  last_key_count;
-	int  recording_edit; /* 1 = recording keys for . repeat */
-	/* marks (cross-box: box_index stored externally) */
-	int  mark_pending;  /* 1 = waiting for mark letter (after m or ') */
+	int  search_active;
+	/* marks */
+	int  mark_pending;  /* 1 = waiting for mark letter */
 	int  mark_action;   /* 'm' = set, '\'' = jump */
+	char mark_letter;   /* the letter, set with result */
+	/* Z prefix */
+	int  pending_Z;
 };
 
 /* --- mouse event --------------------------------------------------------- */
@@ -238,10 +245,11 @@ int  file_save(const struct NotebookFile *f);
 
 /* --- vim engine ---------------------------------------------------------- */
 void vim_init(struct VimState *v);
-void vim_keypress(struct VimState *v, struct GapBuf *buf, int key);
+void vim_keypress(struct VimState *v, struct GapBuf *buf,
+		  struct UndoRing *undo, int key);
 
 /* --- box helpers --------------------------------------------------------- */
-void box_init_new(struct Box *b, int x, int y);
+void box_init_new(struct Box *b, int x, int y, int w, int h);
 
 /* --- text operations (edit.c) -------------------------------------------- */
 int  edit_toggle_wrap(struct GapBuf *buf, struct UndoRing *undo,

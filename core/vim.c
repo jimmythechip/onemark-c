@@ -406,15 +406,14 @@ static int motion_target(struct GapBuf *buf, int pos, int key, int count)
 
 /* --- main keypress handler ----------------------------------------------- */
 
-void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
+void vim_keypress(struct VimState *v, struct GapBuf *buf,
+		  struct UndoRing *undo, int key)
 {
 	int pos, len;
 
 	v->result = VIM_RESULT_NONE;
 	pos = buf ? buf->gap_start : 0;
 	len = buf ? gap_len(buf) : 0;
-
-	struct UndoRing *undo = buf ? (struct UndoRing *)(buf + 1) : NULL;
 
 	switch (v->mode) {
 
@@ -477,14 +476,21 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 			break;
 		}
 
+		/* Z prefix (ZZ = save+quit, ZQ = quit) */
+		if (v->pending_Z) {
+			v->pending_Z = 0; v->count = 0;
+			if (key == 'Z') v->result = VIM_RESULT_ZZ;
+			else if (key == 'Q') v->result = VIM_RESULT_ZQ;
+			break;
+		}
+
 		/* mark pending */
 		if (v->mark_pending) {
 			v->mark_pending = 0;
 			if (key >= 'a' && key <= 'z') {
-				if (v->mark_action == 'm')
-					v->result = 100 + (key - 'a'); /* signal: set mark */
-				else
-					v->result = 200 + (key - 'a'); /* signal: jump to mark */
+				v->mark_letter = key;
+				v->result = (v->mark_action == 'm')
+					? VIM_RESULT_SET_MARK : VIM_RESULT_JUMP_MARK;
 			}
 			v->count = 0;
 			break;
@@ -668,19 +674,11 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 
 		/* --- ZZ / ZQ --- */
 		case 'Z':
-			/* wait for next key */
-			v->pending_g = 2; /* reuse pending_g with value 2 for Z prefix */
+			v->pending_Z = 1;
 			break;
 
 		default:
 			break;
-		}
-
-		/* handle Z prefix */
-		if (v->pending_g == 2 && key != 'Z') {
-			/* This means we already set pending_g=2 on a previous 'Z' press,
-			 * and now we got the second key. But we need to check: the switch
-			 * above already ran for this key. Let me restructure. */
 		}
 
 		v->count = 0;
@@ -820,10 +818,10 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 					v->result = VIM_RESULT_DUPBOX;
 				/* :set key value */
 				else if (strncmp(v->cmd_buf, "set ", 4) == 0)
-					v->result = VIM_RESULT_NONE; /* TODO: handle in main */
+					v->result = VIM_RESULT_SET_FIELD;
 				/* :tag name */
 				else if (strncmp(v->cmd_buf, "tag ", 4) == 0)
-					v->result = VIM_RESULT_NONE; /* TODO */
+					v->result = VIM_RESULT_SET_TAG;
 				v->mode = MODE_NORMAL;
 			}
 			break;

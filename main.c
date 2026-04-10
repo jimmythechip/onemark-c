@@ -456,7 +456,7 @@ int main(int argc, char **argv)
 						struct Box *nb = &file.boxes[file.box_count];
 						int px = (mouse.col + vp_col) * cfg_cell_w;
 						int py = (mouse.row + vp_row) * cfg_cell_h;
-						box_init_new(nb, px, py);
+						box_init_new(nb, px, py, cfg_box_w, cfg_box_h);
 						file.box_count++;
 						focused_box = file.box_count - 1;
 						editing = 1;
@@ -474,7 +474,10 @@ int main(int argc, char **argv)
 
 		/* --- command mode (works with or without focused box) --- */
 		if (vim.mode == MODE_COMMAND) {
-			vim_keypress(&vim, focused_box >= 0 ? &file.boxes[focused_box].body : NULL, key);
+			vim_keypress(&vim,
+				focused_box >= 0 ? &file.boxes[focused_box].body : NULL,
+				focused_box >= 0 ? &file.boxes[focused_box].undo : NULL,
+				key);
 
 			switch (vim.result) {
 			case VIM_RESULT_SAVE:
@@ -502,13 +505,15 @@ int main(int argc, char **argv)
 						nx = file.boxes[file.box_count - 1].x;
 						ny = file.boxes[file.box_count - 1].y + file.boxes[file.box_count - 1].h + 20;
 					}
-					box_init_new(nb, nx, ny);
+					box_init_new(nb, nx, ny, cfg_box_w, cfg_box_h);
 					file.box_count++;
 					focused_box = file.box_count - 1;
 					editing = 1;
 					vim.mode = MODE_INSERT;
 					file.dirty = 1;
 				}
+				break;
+			default:
 				break;
 			}
 
@@ -547,7 +552,7 @@ int main(int argc, char **argv)
 			case 'n': /* new box */
 				if (file.box_count < MAX_BOXES) {
 					struct Box *nb = &file.boxes[file.box_count];
-					box_init_new(nb, b->x + b->w + 20, b->y);
+					box_init_new(nb, b->x + b->w + 20, b->y, cfg_box_w, cfg_box_h);
 					file.box_count++;
 					focus_box(file.box_count - 1);
 					editing = 1;
@@ -558,7 +563,7 @@ int main(int argc, char **argv)
 			case 'd': /* duplicate box */
 				if (file.box_count < MAX_BOXES) {
 					struct Box *nb = &file.boxes[file.box_count];
-					box_init_new(nb, b->x + 20, b->y + 20);
+					box_init_new(nb, b->x + 20, b->y + 20, cfg_box_w, cfg_box_h);
 					/* copy body */
 					char *content = gap_contents(&b->body);
 					gap_free(&nb->body);
@@ -638,19 +643,85 @@ int main(int argc, char **argv)
 				}
 			}
 
-			vim_keypress(&vim, &b->body, key);
-
-			/* handle mark results (100+letter = set, 200+letter = jump) */
-			if (vim.result >= 100 && vim.result < 126) {
-				int letter = vim.result - 100;
-				marks[letter].box = focused_box;
-				marks[letter].pos = b->body.gap_start;
-			} else if (vim.result >= 200 && vim.result < 226) {
-				int letter = vim.result - 200;
-				if (marks[letter].box >= 0 && marks[letter].box < file.box_count) {
-					focus_box(marks[letter].box);
-					gap_move(&file.boxes[marks[letter].box].body, marks[letter].pos);
+			/* ]]/[[, ]b/[b, ]l/[l — bracket nav (two-key, handled here) */
+			if (vim.mode == MODE_NORMAL && (key == ']' || key == '[')) {
+				int dir = key;
+				int key2;
+				struct MouseEvent dummy;
+				if (plat_getinput(&key2, &dummy, 500) == INPUT_KEY) {
+					if (key2 == ']' || key2 == '[') {
+						/* ]] or [[ — heading nav */
+						int np = (dir == ']')
+							? edit_next_heading(&b->body, b->body.gap_start)
+							: edit_prev_heading(&b->body, b->body.gap_start);
+						gap_move(&b->body, np);
+					} else if (key2 == 'b') {
+						/* ]b/[b — box nav */
+						int next = (dir == ']')
+							? reading_order_next(focused_box)
+							: reading_order_prev(focused_box);
+						if (next >= 0) {
+							editing = 0;
+							plat_hide_cursor();
+							focus_box(next);
+						}
+					} else if (key2 == 'l') {
+						/* ]l/[l — list nav */
+						int np = (dir == ']')
+							? edit_next_list_item(&b->body, b->body.gap_start)
+							: edit_prev_list_item(&b->body, b->body.gap_start);
+						gap_move(&b->body, np);
+					} else if (key2 == 'h') {
+						/* ]h/[h — heading nav (alias) */
+						int np = (dir == ']')
+							? edit_next_heading(&b->body, b->body.gap_start)
+							: edit_prev_heading(&b->body, b->body.gap_start);
+						gap_move(&b->body, np);
+					}
 				}
+				redraw();
+				continue;
+			}
+
+			vim_keypress(&vim, &b->body, &b->undo, key);
+
+			/* handle results */
+			if (vim.result == VIM_RESULT_SET_MARK) {
+				int idx = vim.mark_letter - 'a';
+				marks[idx].box = focused_box;
+				marks[idx].pos = b->body.gap_start;
+			} else if (vim.result == VIM_RESULT_JUMP_MARK) {
+				int idx = vim.mark_letter - 'a';
+				if (marks[idx].box >= 0 && marks[idx].box < file.box_count) {
+					focus_box(marks[idx].box);
+					gap_move(&file.boxes[marks[idx].box].body, marks[idx].pos);
+				}
+			} else if (vim.result == VIM_RESULT_ZZ) {
+				file_save(&file);
+				file.dirty = 0;
+				editing = 0;
+				plat_hide_cursor();
+			} else if (vim.result == VIM_RESULT_ZQ) {
+				editing = 0;
+				plat_hide_cursor();
+			} else if (vim.result == VIM_RESULT_SET_FIELD) {
+				/* :set key value — parse from cmd_buf */
+				char *arg = vim.cmd_buf + 4;
+				char *sp = strchr(arg, ' ');
+				if (sp && b->custom_count < MAX_CUSTOM_FIELDS) {
+					*sp = '\0';
+					b->custom[b->custom_count].key = strdup(arg);
+					b->custom[b->custom_count].value = strdup(sp + 1);
+					b->custom_count++;
+					file.dirty = 1;
+				}
+			} else if (vim.result == VIM_RESULT_SET_TAG) {
+				char *arg = vim.cmd_buf + 4;
+				if (strcmp(arg, "idea") == 0) b->tag = TAG_IDEA;
+				else if (strcmp(arg, "todo") == 0) b->tag = TAG_TODO;
+				else if (strcmp(arg, "reference") == 0) b->tag = TAG_REFERENCE;
+				else b->tag = TAG_NONE;
+				file.dirty = 1;
 			}
 
 			if (vim.result == VIM_RESULT_SAVE) {
@@ -680,7 +751,7 @@ int main(int argc, char **argv)
 			} else if (vim.result == VIM_RESULT_DUPBOX) {
 				if (file.box_count < MAX_BOXES) {
 					struct Box *nb = &file.boxes[file.box_count];
-					box_init_new(nb, b->x + 20, b->y + 20);
+					box_init_new(nb, b->x + 20, b->y + 20, cfg_box_w, cfg_box_h);
 					char *content = gap_contents(&b->body);
 					gap_free(&nb->body);
 					gap_init(&nb->body, content, strlen(content));
