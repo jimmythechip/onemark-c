@@ -7,14 +7,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include "core/om.h"
+#include "config.h"
 
-/* --- coordinate scaling -------------------------------------------------- */
-#define CELL_W 8   /* pixels per character column */
-#define CELL_H 16  /* pixels per character row */
-
-/* Convert pixel coords to terminal cells */
-static int px_to_col(int px) { return px / CELL_W; }
-static int px_to_row(int py) { return py / CELL_H; }
+/* Convert pixel coords to terminal cells using config values */
+static int px_to_col(int px) { return px / cfg_cell_w; }
+static int px_to_row(int py) { return py / cfg_cell_h; }
 
 /* --- viewport ------------------------------------------------------------ */
 static int vp_row, vp_col; /* viewport scroll offset in cells */
@@ -412,12 +409,14 @@ int main(int argc, char **argv)
 	int key;
 	struct MouseEvent mouse;
 
+	/* load runtime config (overrides config.h defaults) */
+	conf_ensure_dir();
+	conf_load();
+
 	{
 		const char *path = argc >= 2 ? argv[1] : "notes.md";
-		if (file_parse(&file, path) != 0) {
-			/* file doesn't exist or is empty — create new */
+		if (file_parse(&file, path) != 0)
 			file_init_empty(&file, path);
-		}
 	}
 
 	vim_init(&vim);
@@ -455,8 +454,8 @@ int main(int argc, char **argv)
 					/* click on empty canvas — create a new box here */
 					if (file.box_count < MAX_BOXES) {
 						struct Box *nb = &file.boxes[file.box_count];
-						int px = (mouse.col + vp_col) * CELL_W;
-						int py = (mouse.row + vp_row) * CELL_H;
+						int px = (mouse.col + vp_col) * cfg_cell_w;
+						int py = (mouse.row + vp_row) * cfg_cell_h;
 						box_init_new(nb, px, py);
 						file.box_count++;
 						focused_box = file.box_count - 1;
@@ -597,8 +596,8 @@ int main(int argc, char **argv)
 		if (editing && focused_box >= 0) {
 			struct Box *b = &file.boxes[focused_box];
 
-			/* leader key (space in normal mode) */
-			if (vim.mode == MODE_NORMAL && key == ' ') {
+			/* leader key (configurable, default space) */
+			if (vim.mode == MODE_NORMAL && key == cfg_leader) {
 				leader_pending = 1;
 				redraw();
 				continue;

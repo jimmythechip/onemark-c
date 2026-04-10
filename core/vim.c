@@ -28,6 +28,19 @@ void undo_free(struct UndoRing *u)
 
 void undo_push(struct UndoRing *u, struct GapBuf *buf)
 {
+	/* skip if buffer content hasn't changed since last snapshot */
+	if (u->current >= 0 && u->entries[u->current].text) {
+		char *cur = gap_contents(buf);
+		if (strcmp(cur, u->entries[u->current].text) == 0) {
+			/* only update cursor position */
+			u->entries[u->current].cursor = buf->gap_start;
+			free(cur);
+			return;
+		}
+		free(cur);
+	}
+
+	/* discard any redo entries beyond current */
 	for (int i = u->current + 1; i < u->count; i++) {
 		free(u->entries[i].text);
 		u->entries[i].text = NULL;

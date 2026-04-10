@@ -1,6 +1,6 @@
 include config.mk
 
-SRC = core/buf.c core/file.c core/vim.c core/nav.c core/edit.c core/search.c
+SRC = core/buf.c core/file.c core/vim.c core/nav.c core/edit.c core/search.c core/conf.c
 SRC += plat/$(PLATFORM).c main.c
 
 OBJ = $(SRC:.c=.o)

@@ -1,29 +1,49 @@
 /* onemark compile-time configuration
  *
  * Copy this file to config.h and edit to taste. Recompile after changes.
- * Runtime config (~/.config/onemark/config) overrides these defaults.
+ * Runtime config file (~/.config/onemark/config) overrides these at startup.
  */
 
 /* vim leader key (single character) */
-static const char *default_leader = " ";
-
-/* tab stop width */
-static const int default_tab_stop = 4;
+char cfg_leader = ' ';
 
 /* pixels per character cell for coordinate scaling from Electron format */
-static const int default_cell_w = 8;
-static const int default_cell_h = 16;
+int cfg_cell_w = 8;
+int cfg_cell_h = 16;
 
-/* ANSI color indices for tags (0-7, add 8 for bold) */
-static const struct { const char *name; int color; } default_tags[] = {
+/* default box size in pixels (for new boxes) */
+int cfg_box_w = 320;
+int cfg_box_h = 180;
+
+/* maximum undo history entries per box */
+int cfg_undo_max = 100;
+
+/* auto-save debounce in milliseconds (0 = disabled) */
+int cfg_save_debounce_ms = 500;
+
+/* tag definitions: name + ANSI color (0-7) */
+const struct { const char *name; int color; } cfg_tags[] = {
 	{ "none",      7 },  /* white */
 	{ "idea",      4 },  /* blue */
 	{ "todo",      3 },  /* yellow */
 	{ "reference", 5 },  /* magenta */
 };
 
-/* maximum undo history depth */
-static const int default_history_depth = 50;
-
-/* auto-save debounce in milliseconds */
-static const int default_save_debounce_ms = 500;
+/*
+ * Keybindings for leader-key dispatch (Space + <key>).
+ * action values are single chars dispatched in the leader handler.
+ */
+const struct { int key; int action; } cfg_leader_bindings[] = {
+	{ 'b', 'b' },  /* bold */
+	{ 'i', 'i' },  /* italic */
+	{ '1', '1' },  /* checkbox rotate */
+	{ 't', 't' },  /* cycle tag */
+	{ 'w', 'w' },  /* save */
+	{ 'n', 'n' },  /* new box */
+	{ 'd', 'd' },  /* duplicate box */
+	{ 'D', 'D' },  /* delete box */
+	{ 'p', 'p' },  /* peek (reserved) */
+	{ 's', 's' },  /* easymotion (reserved) */
+};
+#define CFG_LEADER_BIND_COUNT \
+	(int)(sizeof(cfg_leader_bindings) / sizeof(cfg_leader_bindings[0]))

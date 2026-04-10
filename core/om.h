@@ -210,6 +210,10 @@ struct JumpHistory {
 	int count;
 };
 
+/* --- config (conf.c) ----------------------------------------------------- */
+void conf_load(void);
+void conf_ensure_dir(void);
+
 /* --- platform interface (implemented in plat/ ) -------------------------- */
 void plat_init(void);
 void plat_deinit(void);

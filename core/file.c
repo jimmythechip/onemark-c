@@ -458,7 +458,7 @@ void box_init_new(struct Box *b, int x, int y)
 	b->title_is_default = 1;
 	b->tag = TAG_NONE;
 	b->x = x; b->y = y;
-	b->w = 320; b->h = 180;
+	b->w = 320; b->h = 180; /* default; caller can override via config */
 	gap_init(&b->body, "", 0);
 	undo_init(&b->undo);
 }
