@@ -1,0 +1,4 @@
+onemark
+*.o
+*.d
+config.h
