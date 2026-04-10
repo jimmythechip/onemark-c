@@ -10,7 +10,7 @@
 #include "../core/om.h"
 
 /* cursor position for streaming writes (plat_addstr advances this) */
-static int cur_x, cur_y;
+int cur_x, cur_y;
 
 void plat_init(void)
 {
@@ -67,6 +67,16 @@ void plat_addstr(const char *s, int len, int attr)
 void plat_addch(char c, int attr)
 {
 	plat_addstr(&c, 1, attr);
+}
+
+void plat_adduc(int uc, int attr)
+{
+	uintattr_t fg = map_fg(attr);
+	int w = tb_width();
+	int h = tb_height();
+	if (cur_x >= 0 && cur_x < w && cur_y >= 0 && cur_y < h)
+		tb_set_cell(cur_x, cur_y, (uint32_t)uc, fg, TB_DEFAULT);
+	cur_x++;
 }
 
 void plat_refresh(void)

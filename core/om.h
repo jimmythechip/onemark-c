@@ -226,6 +226,7 @@ void plat_clear(void);
 void plat_move(int row, int col);
 void plat_addstr(const char *s, int len, int attr);
 void plat_addch(char c, int attr);
+void plat_adduc(int uc, int attr);  /* write Unicode codepoint */
 void plat_refresh(void);
 int  plat_rows(void);
 int  plat_cols(void);

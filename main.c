@@ -35,6 +35,16 @@ static struct JumpHistory jumphist;
 
 /* --- drawing ------------------------------------------------------------- */
 
+/* Unicode box-drawing characters (U+2500 range).
+ * Supported by all modern terminals. For VT100 hardware, these map
+ * to the DEC Special Graphics character set (ESC(0). */
+#define BOX_H   0x2500  /* ─ horizontal */
+#define BOX_V   0x2502  /* │ vertical */
+#define BOX_TL  0x250C  /* ┌ top-left */
+#define BOX_TR  0x2510  /* ┐ top-right */
+#define BOX_BL  0x2514  /* └ bottom-left */
+#define BOX_BR  0x2518  /* ┘ bottom-right */
+
 static void draw_box_border(int r, int c, int w, int h, int focused, enum Tag tag)
 {
 	int attr = 0;
@@ -51,27 +61,27 @@ static void draw_box_border(int r, int c, int w, int h, int focused, enum Tag ta
 
 	/* top border */
 	if (r >= 0 && r < rows - 1) {
-		if (c >= 0 && c < cols) { plat_move(r, c); plat_addch('+', attr); }
+		if (c >= 0 && c < cols) { plat_move(r, c); plat_adduc(BOX_TL, attr); }
 		for (int x = 1; x < w - 1; x++)
-			if (c + x >= 0 && c + x < cols) { plat_move(r, c + x); plat_addch('-', attr); }
-		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(r, c + w - 1); plat_addch('+', attr); }
+			if (c + x >= 0 && c + x < cols) { plat_move(r, c + x); plat_adduc(BOX_H, attr); }
+		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(r, c + w - 1); plat_adduc(BOX_TR, attr); }
 	}
 
-	/* sides + content area */
+	/* sides */
 	for (int y = 1; y < h - 1; y++) {
 		int row = r + y;
 		if (row < 0 || row >= rows - 1) continue;
-		if (c >= 0 && c < cols) { plat_move(row, c); plat_addch('|', attr); }
-		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(row, c + w - 1); plat_addch('|', attr); }
+		if (c >= 0 && c < cols) { plat_move(row, c); plat_adduc(BOX_V, attr); }
+		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(row, c + w - 1); plat_adduc(BOX_V, attr); }
 	}
 
 	/* bottom border */
 	if (r + h - 1 >= 0 && r + h - 1 < rows - 1) {
 		int row = r + h - 1;
-		if (c >= 0 && c < cols) { plat_move(row, c); plat_addch('+', attr); }
+		if (c >= 0 && c < cols) { plat_move(row, c); plat_adduc(BOX_BL, attr); }
 		for (int x = 1; x < w - 1; x++)
-			if (c + x >= 0 && c + x < cols) { plat_move(row, c + x); plat_addch('-', attr); }
-		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(row, c + w - 1); plat_addch('+', attr); }
+			if (c + x >= 0 && c + x < cols) { plat_move(row, c + x); plat_adduc(BOX_H, attr); }
+		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(row, c + w - 1); plat_adduc(BOX_BR, attr); }
 	}
 }
 
@@ -148,48 +158,81 @@ static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 			plat_addch(' ', ATTR_REVERSE);
 	}
 
-	/* body with cursor */
+	/* first pass: find which line the cursor is on so we can scroll
+	 * the view within the box if the cursor is past the visible area */
 	int cursor_pos = b->body.gap_start;
-	int char_idx = 0;
-	int cursor_row = -1, cursor_col = -1;
 	int len = gap_len(&b->body);
+	int cursor_line = 0;
+	{
+		int line = 0, col = 0;
+		for (int ci = 0; ci < len; ci++) {
+			if (ci == cursor_pos)
+				cursor_line = line;
+			if (gap_char_at(&b->body, ci) == '\n') {
+				line++;
+				col = 0;
+			} else {
+				col++;
+			}
+		}
+		if (cursor_pos == len)
+			cursor_line = line;
+	}
 
-	for (int row = 0; row < inner_h - 1; row++) {
+	/* scroll offset: if cursor line is past visible area, shift view */
+	int body_rows = inner_h - 1; /* rows available for body (1 used by title) */
+	int scroll = 0;
+	if (cursor_line >= body_rows)
+		scroll = cursor_line - body_rows + 1;
+
+	/* render body lines */
+	int char_idx = 0;
+	int cur_line = 0;
+	int cursor_row = -1, cursor_col = -1;
+
+	/* skip to scroll offset */
+	while (cur_line < scroll && char_idx < len) {
+		if (gap_char_at(&b->body, char_idx) == '\n') cur_line++;
+		char_idx++;
+	}
+
+	for (int row = 0; row < body_rows; row++) {
 		int scr_row = r + 2 + row;
 		if (scr_row < 0 || scr_row >= rows - 1) {
-			/* skip line */
 			while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n')
 				char_idx++;
-			if (char_idx < len) char_idx++; /* skip newline */
+			if (char_idx < len) char_idx++;
 			continue;
 		}
 		plat_move(scr_row, c + 1);
-		int col_in_line = 0;
-		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n' && col_in_line < inner_w) {
+		int col = 0;
+		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n' && col < inner_w) {
 			if (char_idx == cursor_pos) {
 				cursor_row = scr_row;
-				cursor_col = c + 1 + col_in_line;
+				cursor_col = c + 1 + col;
 			}
 			plat_addch(gap_char_at(&b->body, char_idx), 0);
 			char_idx++;
-			col_in_line++;
+			col++;
 		}
+		/* cursor at end of line or end of buffer */
 		if (char_idx == cursor_pos) {
 			cursor_row = scr_row;
-			cursor_col = c + 1 + col_in_line;
+			cursor_col = c + 1 + col;
 		}
-		/* pad */
-		for (int x = col_in_line; x < inner_w; x++)
+		for (int x = col; x < inner_w; x++)
 			plat_addch(' ', 0);
-		/* skip rest of long line + newline */
 		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n')
 			char_idx++;
 		if (char_idx < len) char_idx++;
 	}
 
-	/* show cursor */
-	if (cursor_row >= 0)
-		plat_show_cursor(cursor_row, cursor_col);
+	/* always show cursor — fall back to first body position if not found */
+	if (cursor_row < 0) {
+		cursor_row = r + 2;
+		cursor_col = c + 1;
+	}
+	plat_show_cursor(cursor_row, cursor_col);
 }
 
 static void draw_status(void)

@@ -13,7 +13,7 @@ int cfg_cell_h = 16;
 
 /* default box size in pixels (for new boxes) */
 int cfg_box_w = 320;
-int cfg_box_h = 180;
+int cfg_box_h = 120;
 
 /* maximum undo history entries per box */
 int cfg_undo_max = 100;
