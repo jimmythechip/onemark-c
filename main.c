@@ -325,10 +325,10 @@ static void redraw(void)
 		int is_focused = (i == focused_box);
 		draw_box_border(r, c, w, h, is_focused, b->tag);
 
-		if (is_focused && editing)
+		if (is_focused)
 			draw_editing_box(b, r, c, w, h);
 		else
-			draw_box_content(b, r, c, w, h, is_focused);
+			draw_box_content(b, r, c, w, h, 0);
 	}
 
 	if (file.box_count == 0) {
@@ -427,8 +427,14 @@ static void focus_box(int idx)
 		jump_push(focused_box, file.boxes[focused_box].body.gap_start);
 	focused_box = idx;
 	if (idx >= 0) {
+		editing = 1;
+		if (vim.mode == MODE_INSERT)
+			vim.mode = MODE_NORMAL; /* reset to NORMAL on box change */
 		jump_push(idx, file.boxes[idx].body.gap_start);
 		auto_scroll_to_box(idx);
+	} else {
+		editing = 0;
+		plat_hide_cursor();
 	}
 }
 
@@ -576,14 +582,8 @@ int main(int argc, char **argv)
 						drag_ox = mouse.col - (px_to_col(b->x) - vp_col);
 						drag_oy = mouse.row - (px_to_row(b->y) - vp_row);
 					} else {
-						/* interior → focus (or edit if already focused) */
-						if (hit == focused_box && editing) {
-							/* click inside editing box — TODO: place cursor */
-						} else {
-							focused_box = hit;
-							editing = 0;
-							plat_hide_cursor();
-						}
+						/* interior → focus box, enter NORMAL */
+						focus_box(hit);
 					}
 				} else {
 					/* click on empty canvas → create box */
