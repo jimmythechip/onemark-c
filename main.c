@@ -242,8 +242,10 @@ static void redraw(void)
 	}
 
 	if (file.box_count == 0) {
-		plat_move(1, 1);
-		plat_addstr("Empty file. Press ':newbox' to create a box.", -1, ATTR_DIM);
+		plat_move(1, 2);
+		plat_addstr("No boxes yet.  Type  :newbox  then Enter.", -1, ATTR_DIM);
+		plat_move(2, 2);
+		plat_addstr("Press q to quit.", -1, ATTR_DIM);
 	}
 
 	draw_status();
@@ -380,10 +382,10 @@ int main(int argc, char **argv)
 		}
 
 		/* INPUT_KEY */
-		if (editing && focused_box >= 0) {
-			/* keys go to vim engine */
-			struct Box *b = &file.boxes[focused_box];
-			vim_keypress(&vim, &b->body, key);
+
+		/* --- command mode (works with or without focused box) --- */
+		if (vim.mode == MODE_COMMAND) {
+			vim_keypress(&vim, focused_box >= 0 ? &file.boxes[focused_box].body : NULL, key);
 
 			switch (vim.result) {
 			case VIM_RESULT_SAVE:
@@ -403,8 +405,14 @@ int main(int argc, char **argv)
 			case VIM_RESULT_NEWBOX:
 				if (file.box_count < MAX_BOXES) {
 					struct Box *nb = &file.boxes[file.box_count];
-					int nx = b->x + b->w + 20;
-					int ny = b->y;
+					int nx = 40, ny = 40;
+					if (focused_box >= 0) {
+						nx = file.boxes[focused_box].x + file.boxes[focused_box].w + 20;
+						ny = file.boxes[focused_box].y;
+					} else if (file.box_count > 0) {
+						nx = file.boxes[file.box_count - 1].x;
+						ny = file.boxes[file.box_count - 1].y + file.boxes[file.box_count - 1].h + 20;
+					}
 					box_init_new(nb, nx, ny);
 					file.box_count++;
 					focused_box = file.box_count - 1;
@@ -415,21 +423,44 @@ int main(int argc, char **argv)
 				break;
 			}
 
-			if (vim.mode == MODE_NORMAL && key == KEY_ESC) {
-				/* Escape in normal while editing = exit editing */
+			if (vim.mode == MODE_NORMAL)
+				editing = (focused_box >= 0) ? editing : 0;
+
+			redraw();
+			continue;
+		}
+
+		/* --- box editing (vim normal/insert inside a box) --- */
+		if (editing && focused_box >= 0) {
+			struct Box *b = &file.boxes[focused_box];
+			vim_keypress(&vim, &b->body, key);
+
+			if (vim.result == VIM_RESULT_SAVE) {
+				file_save(&file);
+				file.dirty = 0;
+			} else if (vim.result == VIM_RESULT_QUIT) {
+				editing = 0;
+				printf("\033[?25l");
+			} else if (vim.result == VIM_RESULT_SAVEQUIT) {
+				file_save(&file);
+				file.dirty = 0;
 				editing = 0;
 				printf("\033[?25l");
 			}
 
-			if (vim.result == VIM_RESULT_NONE &&
-			    vim.mode == MODE_INSERT)
+			if (vim.mode == MODE_NORMAL && key == KEY_ESC) {
+				editing = 0;
+				printf("\033[?25l");
+			}
+
+			if (vim.result == VIM_RESULT_NONE && vim.mode == MODE_INSERT)
 				file.dirty = 1;
 
 			redraw();
 			continue;
 		}
 
-		/* canvas-level keys (not editing) */
+		/* --- canvas-level keys (not editing a box) --- */
 		switch (key) {
 		case 'q':
 			if (file.dirty)
@@ -440,7 +471,6 @@ int main(int argc, char **argv)
 		case '\r':
 		case '\n':
 		case 'i':
-			/* enter editing mode */
 			if (focused_box >= 0) {
 				editing = 1;
 				vim.mode = (key == 'i') ? MODE_INSERT : MODE_NORMAL;
@@ -451,23 +481,18 @@ int main(int argc, char **argv)
 			focused_box = -1;
 			break;
 
-		/* ]b / [b — reading order nav (simplified: just j/k at canvas level) */
 		case 'j':
 		case KEY_DOWN:
-		case ']':
 			focused_box = reading_order_next(focused_box);
 			break;
 		case 'k':
 		case KEY_UP:
-		case '[':
 			focused_box = reading_order_prev(focused_box);
 			break;
 
-		/* Ctrl-hjkl — spatial navigation */
 		case KEY_CTRL('h'):
 			focused_box = spatial_nav(focused_box, 'h');
 			break;
-		/* Ctrl-J = '\n' = 10 — conflicts with Enter. Use Ctrl-N instead. */
 		case KEY_CTRL('n'):
 			focused_box = spatial_nav(focused_box, 'j');
 			break;
@@ -478,14 +503,10 @@ int main(int argc, char **argv)
 			focused_box = spatial_nav(focused_box, 'l');
 			break;
 
-		/* : at canvas level */
 		case ':':
-			editing = 1;
 			vim.mode = MODE_COMMAND;
 			vim.cmd_len = 0;
 			vim.cmd_buf[0] = '\0';
-			if (focused_box < 0 && file.box_count > 0)
-				focused_box = 0;
 			break;
 		}
 

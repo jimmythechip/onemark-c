@@ -137,13 +137,14 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 	int pos, len;
 
 	v->result = VIM_RESULT_NONE;
-	pos = buf->gap_start;
-	len = gap_len(buf);
+	pos = buf ? buf->gap_start : 0;
+	len = buf ? gap_len(buf) : 0;
 
 	switch (v->mode) {
 
 	/* ================================================================== */
 	case MODE_INSERT:
+		if (!buf) { v->mode = MODE_NORMAL; break; }
 		switch (key) {
 		case KEY_ESC:
 			v->mode = MODE_NORMAL;
@@ -191,6 +192,7 @@ void vim_keypress(struct VimState *v, struct GapBuf *buf, int key)
 
 	/* ================================================================== */
 	case MODE_NORMAL:
+		if (!buf) break;
 		switch (key) {
 		/* enter insert */
 		case 'i':
