@@ -1,7 +1,9 @@
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 /* onemark — runtime config parser
  *
- * Reads ~/.config/onemark/config (simple key = value format).
+ * Reads ~/.config/onemark/config (or %APPDATA%\onemark\config on Windows).
  * Overrides compile-time defaults from config.h.
  * Unknown keys are silently ignored.
  */
@@ -9,8 +11,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#ifdef _WIN32
+#include <direct.h>
+#include <io.h>
+#define mkdir(p,m) _mkdir(p)
+#define access(p,m) _access(p,0)
+#define F_OK 0
+#else
 #include <unistd.h>
 #include <sys/stat.h>
+#endif
 #include "om.h"
 
 /* config.h is included by the translation unit that calls conf_load,
@@ -40,12 +50,19 @@ static void trim(char *s)
 
 static char *config_path(void)
 {
+#ifdef _WIN32
+	const char *home = getenv("APPDATA");
+#else
 	const char *home = getenv("HOME");
+#endif
 	if (!home) return NULL;
-	/* ~/.config/onemark/config */
-	int len = strlen(home) + 32;
+	int len = (int)strlen(home) + 40;
 	char *path = malloc(len);
+#ifdef _WIN32
+	snprintf(path, len, "%s\\onemark\\config", home);
+#else
 	snprintf(path, len, "%s/.config/onemark/config", home);
+#endif
 	return path;
 }
 
@@ -107,17 +124,30 @@ void conf_load(void)
 
 void conf_ensure_dir(void)
 {
+#ifdef _WIN32
+	const char *home = getenv("APPDATA");
+#else
 	const char *home = getenv("HOME");
+#endif
 	if (!home) return;
 	char dir[512];
+#ifdef _WIN32
+	snprintf(dir, sizeof dir, "%s\\onemark", home);
+	mkdir(dir, 0);
+#else
 	snprintf(dir, sizeof dir, "%s/.config", home);
 	mkdir(dir, 0755);
 	snprintf(dir, sizeof dir, "%s/.config/onemark", home);
 	mkdir(dir, 0755);
+#endif
 
 	/* write default config if it doesn't exist */
 	char path[512];
+#ifdef _WIN32
+	snprintf(path, sizeof path, "%s\\onemark\\config", home);
+#else
 	snprintf(path, sizeof path, "%s/.config/onemark/config", home);
+#endif
 	if (access(path, F_OK) != 0) {
 		FILE *fp = fopen(path, "w");
 		if (fp) {

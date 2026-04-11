@@ -1,87 +1,59 @@
-#define _POSIX_C_SOURCE 200809L
-/* onemark — main entry point
+/* onemark — terminal frontend
  *
- * Spatial canvas rendering, box navigation, input loop.
+ * Renders the app state via termbox2 (plat_* API).
+ * Converts between terminal cells and file-pixel coordinates.
+ * All logic is in app.c; this file only draws and gathers input.
  */
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include "core/om.h"
-#include "config.h"
+#include "app.h"
 
-/* Convert pixel coords to terminal cells using config values */
+/* Convert file-pixel coords ↔ terminal cells */
 static int px_to_col(int px) { return px / cfg_cell_w; }
 static int px_to_row(int py) { return py / cfg_cell_h; }
+static int col_to_px(int c)  { return c * cfg_cell_w; }
+static int row_to_px(int r)  { return r * cfg_cell_h; }
 
-/* --- viewport ------------------------------------------------------------ */
-static int vp_row, vp_col; /* viewport scroll offset in cells */
+/* Unicode box-drawing characters */
+#define BOX_H   0x2500
+#define BOX_V   0x2502
+#define BOX_TL  0x250C
+#define BOX_TR  0x2510
+#define BOX_BL  0x2514
+#define BOX_BR  0x2518
 
-/* --- app state ----------------------------------------------------------- */
-static struct NotebookFile file;
-static struct VimState vim;
-static int focused_box = -1; /* index into file.boxes, -1 = none */
-static int editing = 0;      /* 1 = editing box body (vim active) */
-static int running = 1;
-static int leader_pending = 0; /* waiting for key after leader */
-
-/* mouse drag state */
-static int dragging = 0;     /* 1 = dragging a box, 2 = resizing */
-static int drag_box = -1;    /* which box is being dragged */
-static int drag_ox, drag_oy; /* offset from box origin to mouse at drag start */
-
-/* title editing state */
-static int editing_title = 0;
-static char title_buf[256];
-static int title_len;
-static int title_cursor;
-
-/* cross-box state */
-static struct Mark marks[26]; /* a-z */
-static struct JumpHistory jumphist;
+static struct App app;
 
 /* --- drawing ------------------------------------------------------------- */
 
-/* Unicode box-drawing characters (U+2500 range).
- * Supported by all modern terminals. For VT100 hardware, these map
- * to the DEC Special Graphics character set (ESC(0). */
-#define BOX_H   0x2500  /* ─ horizontal */
-#define BOX_V   0x2502  /* │ vertical */
-#define BOX_TL  0x250C  /* ┌ top-left */
-#define BOX_TR  0x2510  /* ┐ top-right */
-#define BOX_BL  0x2514  /* └ bottom-left */
-#define BOX_BR  0x2518  /* ┘ bottom-right */
-
-static void draw_box_border(int r, int c, int w, int h, int focused, enum Tag tag)
+static void draw_box_border(int r, int c, int w, int h, int focused, int hovered, enum Tag tag)
 {
 	int attr = 0;
-	int rows = plat_rows();
-	int cols = plat_cols();
+	int rows = plat_rows(), cols = plat_cols();
 
 	if (focused) attr = ATTR_BOLD;
+	else if (hovered) attr = ATTR_DIM; /* subtle hover hint */
 	switch (tag) {
 	case TAG_IDEA:      attr |= ATTR_COLOR(COL_BLUE); break;
-	case TAG_TODO:       attr |= ATTR_COLOR(COL_YELLOW); break;
-	case TAG_REFERENCE:  attr |= ATTR_COLOR(COL_MAGENTA); break;
+	case TAG_TODO:      attr |= ATTR_COLOR(COL_YELLOW); break;
+	case TAG_REFERENCE: attr |= ATTR_COLOR(COL_MAGENTA); break;
 	default: break;
 	}
 
-	/* top border */
 	if (r >= 0 && r < rows - 1) {
 		if (c >= 0 && c < cols) { plat_move(r, c); plat_adduc(BOX_TL, attr); }
 		for (int x = 1; x < w - 1; x++)
 			if (c + x >= 0 && c + x < cols) { plat_move(r, c + x); plat_adduc(BOX_H, attr); }
 		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(r, c + w - 1); plat_adduc(BOX_TR, attr); }
 	}
-
-	/* sides */
 	for (int y = 1; y < h - 1; y++) {
 		int row = r + y;
 		if (row < 0 || row >= rows - 1) continue;
 		if (c >= 0 && c < cols) { plat_move(row, c); plat_adduc(BOX_V, attr); }
 		if (c + w - 1 >= 0 && c + w - 1 < cols) { plat_move(row, c + w - 1); plat_adduc(BOX_V, attr); }
 	}
-
-	/* bottom border */
 	if (r + h - 1 >= 0 && r + h - 1 < rows - 1) {
 		int row = r + h - 1;
 		if (c >= 0 && c < cols) { plat_move(row, c); plat_adduc(BOX_BL, attr); }
@@ -93,17 +65,14 @@ static void draw_box_border(int r, int c, int w, int h, int focused, enum Tag ta
 
 static void draw_box_content(struct Box *b, int r, int c, int w, int h, int focused)
 {
-	int inner_w = w - 2;
-	int inner_h = h - 2;
+	int inner_w = w - 2, inner_h = h - 2;
 	int rows = plat_rows();
-	/* focused (not editing): reverse title to show it's selected */
 	int title_attr = focused ? (ATTR_BOLD | ATTR_REVERSE) : ATTR_BOLD;
 
 	if (inner_w <= 0 || inner_h <= 0) return;
 
-	/* title line */
 	if (r + 1 >= 0 && r + 1 < rows - 1) {
-		int tlen = strlen(b->title);
+		int tlen = (int)strlen(b->title);
 		if (tlen > inner_w) tlen = inner_w;
 		plat_move(r + 1, c + 1);
 		plat_addstr(b->title, tlen, title_attr);
@@ -111,34 +80,24 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int focu
 			plat_addch(' ', title_attr);
 	}
 
-	/* body lines */
 	char *content = gap_contents(&b->body);
 	char *line = content;
-
 	for (int row = 0; row < inner_h - 1; row++) {
 		int scr_row = r + 2 + row;
 		if (scr_row < 0 || scr_row >= rows - 1) {
-			/* advance to next line anyway */
-			if (line && *line) {
-				char *nl = strchr(line, '\n');
-				line = nl ? nl + 1 : NULL;
-			}
+			if (line && *line) { char *nl = strchr(line, '\n'); line = nl ? nl + 1 : NULL; }
 			continue;
 		}
-
 		plat_move(scr_row, c + 1);
 		if (line && *line) {
 			char *nl = strchr(line, '\n');
 			int ll = nl ? (int)(nl - line) : (int)strlen(line);
 			if (ll > inner_w) ll = inner_w;
 			plat_addstr(line, ll, 0);
-			/* pad rest */
-			for (int x = ll; x < inner_w; x++)
-				plat_addch(' ', 0);
+			for (int x = ll; x < inner_w; x++) plat_addch(' ', 0);
 			line = nl ? nl + 1 : NULL;
 		} else {
-			for (int x = 0; x < inner_w; x++)
-				plat_addch(' ', 0);
+			for (int x = 0; x < inner_w; x++) plat_addch(' ', 0);
 		}
 	}
 	free(content);
@@ -146,8 +105,7 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int focu
 
 static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 {
-	int inner_w = w - 2;
-	int inner_h = h - 2;
+	int inner_w = w - 2, inner_h = h - 2;
 	int rows = plat_rows();
 
 	if (inner_w <= 0 || inner_h <= 0) return;
@@ -155,204 +113,161 @@ static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 	/* title */
 	if (r + 1 >= 0 && r + 1 < rows - 1) {
 		plat_move(r + 1, c + 1);
-		if (editing_title && focused_box >= 0 && b == &file.boxes[focused_box]) {
-			/* editing title: show title_buf with cursor */
-			int tlen = title_len;
+		if (app.editing_title) {
+			int tlen = app.title_len;
 			if (tlen > inner_w) tlen = inner_w;
-			plat_addstr(title_buf, tlen, ATTR_BOLD | ATTR_REVERSE);
-			for (int x = tlen; x < inner_w; x++)
-				plat_addch(' ', ATTR_REVERSE);
-			int tc = title_cursor < inner_w ? title_cursor : inner_w - 1;
+			plat_addstr(app.title_buf, tlen, ATTR_BOLD | ATTR_REVERSE);
+			for (int x = tlen; x < inner_w; x++) plat_addch(' ', ATTR_REVERSE);
+			int tc = app.title_cursor < inner_w ? app.title_cursor : inner_w - 1;
 			plat_show_cursor(r + 1, c + 1 + tc);
-			plat_cursor_style(5); /* bar cursor for title edit */
-			return; /* don't draw body while editing title */
+			plat_cursor_style(5);
+			return;
 		}
-		int tlen = strlen(b->title);
+		int tlen = (int)strlen(b->title);
 		if (tlen > inner_w) tlen = inner_w;
 		plat_addstr(b->title, tlen, ATTR_BOLD | ATTR_REVERSE);
-		for (int x = tlen; x < inner_w; x++)
-			plat_addch(' ', ATTR_REVERSE);
+		for (int x = tlen; x < inner_w; x++) plat_addch(' ', ATTR_REVERSE);
 	}
 
-	/* first pass: find which line the cursor is on so we can scroll
-	 * the view within the box if the cursor is past the visible area */
+	/* cursor + scroll + body rendering */
 	int cursor_pos = b->body.gap_start;
 	int len = gap_len(&b->body);
 	int cursor_line = 0;
 	{
-		int line = 0, col = 0;
+		int ln = 0;
 		for (int ci = 0; ci < len; ci++) {
-			if (ci == cursor_pos)
-				cursor_line = line;
-			if (gap_char_at(&b->body, ci) == '\n') {
-				line++;
-				col = 0;
-			} else {
-				col++;
-			}
+			if (ci == cursor_pos) cursor_line = ln;
+			if (gap_char_at(&b->body, ci) == '\n') ln++;
 		}
-		if (cursor_pos == len)
-			cursor_line = line;
+		if (cursor_pos == len) cursor_line = ln;
 	}
 
-	/* scroll offset: if cursor line is past visible area, shift view */
-	int body_rows = inner_h - 1; /* rows available for body (1 used by title) */
-	int scroll = 0;
-	if (cursor_line >= body_rows)
-		scroll = cursor_line - body_rows + 1;
+	int body_rows = inner_h - 1;
+	int scroll = cursor_line >= body_rows ? cursor_line - body_rows + 1 : 0;
 
-	/* render body lines */
-	int char_idx = 0;
-	int cur_line = 0;
+	int char_idx = 0, cur_line = 0;
 	int cursor_row = -1, cursor_col = -1;
 
-	/* skip to scroll offset */
 	while (cur_line < scroll && char_idx < len) {
 		if (gap_char_at(&b->body, char_idx) == '\n') cur_line++;
 		char_idx++;
 	}
 
+	/* visual highlight range */
+	int vis_from = -1, vis_to = -1;
+	if (app.vim.mode == MODE_VISUAL || app.vim.mode == MODE_VLINE) {
+		vis_from = app.vim.visual_start;
+		vis_to = cursor_pos;
+		if (vis_from > vis_to) { int t = vis_from; vis_from = vis_to; vis_to = t; }
+		vis_to++;
+		if (app.vim.mode == MODE_VLINE) {
+			int vf = vis_from, vt = vis_to > 0 ? vis_to - 1 : 0;
+			while (vf > 0 && gap_char_at(&b->body, vf - 1) != '\n') vf--;
+			while (vt < len && gap_char_at(&b->body, vt) != '\n') vt++;
+			vis_from = vf; vis_to = vt;
+		}
+	}
+
 	for (int row = 0; row < body_rows; row++) {
 		int scr_row = r + 2 + row;
 		if (scr_row < 0 || scr_row >= rows - 1) {
-			while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n')
-				char_idx++;
+			while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n') char_idx++;
 			if (char_idx < len) char_idx++;
 			continue;
 		}
 		plat_move(scr_row, c + 1);
 		int col = 0;
-		/* compute visual highlight range */
-		int vis_from = -1, vis_to = -1;
-		if (vim.mode == MODE_VISUAL || vim.mode == MODE_VLINE) {
-			vis_from = vim.visual_start;
-			vis_to = cursor_pos;
-			if (vis_from > vis_to) { int t = vis_from; vis_from = vis_to; vis_to = t; }
-			vis_to++; /* inclusive */
-			if (vim.mode == MODE_VLINE) {
-				/* extend to full lines */
-				int vf = vis_from, vt = vis_to > 0 ? vis_to - 1 : 0;
-				while (vf > 0 && gap_char_at(&b->body, vf - 1) != '\n') vf--;
-				while (vt < len && gap_char_at(&b->body, vt) != '\n') vt++;
-				vis_from = vf;
-				vis_to = vt;
-			}
-		}
 		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n' && col < inner_w) {
-			if (char_idx == cursor_pos) {
-				cursor_row = scr_row;
-				cursor_col = c + 1 + col;
-			}
+			if (char_idx == cursor_pos) { cursor_row = scr_row; cursor_col = c + 1 + col; }
 			int attr = (char_idx >= vis_from && char_idx < vis_to) ? ATTR_REVERSE : 0;
 			plat_addch(gap_char_at(&b->body, char_idx), attr);
-			char_idx++;
-			col++;
+			char_idx++; col++;
 		}
-		/* cursor at end of line or end of buffer */
-		if (char_idx == cursor_pos) {
-			cursor_row = scr_row;
-			cursor_col = c + 1 + col;
-		}
-		for (int x = col; x < inner_w; x++)
-			plat_addch(' ', 0);
-		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n')
-			char_idx++;
+		if (char_idx == cursor_pos) { cursor_row = scr_row; cursor_col = c + 1 + col; }
+		for (int x = col; x < inner_w; x++) plat_addch(' ', 0);
+		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n') char_idx++;
 		if (char_idx < len) char_idx++;
 	}
 
-	/* always show cursor — fall back to first body position if not found */
-	if (cursor_row < 0) {
-		cursor_row = r + 2;
-		cursor_col = c + 1;
-	}
+	if (cursor_row < 0) { cursor_row = r + 2; cursor_col = c + 1; }
 	plat_show_cursor(cursor_row, cursor_col);
-	/* vim cursor style: block in NORMAL, bar in INSERT */
-	if (vim.mode == MODE_INSERT)
-		plat_cursor_style(5); /* blinking bar */
-	else
-		plat_cursor_style(1); /* blinking block */
+	plat_cursor_style(app.vim.mode == MODE_INSERT ? 5 : 1);
 }
 
 static void draw_status(void)
 {
-	int cols = plat_cols();
-	int rows = plat_rows();
+	int cols = plat_cols(), rows = plat_rows();
 	char status[256];
 	const char *mode_str;
 
-	switch (vim.mode) {
+	switch (app.vim.mode) {
 	case MODE_INSERT:     mode_str = "INSERT"; break;
 	case MODE_VISUAL:     mode_str = "VISUAL"; break;
 	case MODE_VLINE:      mode_str = "V-LINE"; break;
 	case MODE_OP_PENDING: mode_str = "OP-PENDING"; break;
 	case MODE_COMMAND:    mode_str = "COMMAND"; break;
-	default:              mode_str = leader_pending ? "LEADER" : "NORMAL"; break;
+	default:              mode_str = app.leader_pending ? "LEADER" : "NORMAL"; break;
 	}
 
-	if (vim.search_active) {
-		snprintf(status, sizeof status, "/%.250s", vim.search_buf);
-	} else if (vim.mode == MODE_COMMAND) {
-		snprintf(status, sizeof status, ":%.250s", vim.cmd_buf);
+	if (app.vim.search_active) {
+		snprintf(status, sizeof status, "/%.250s", app.vim.search_buf);
+	} else if (app.vim.mode == MODE_COMMAND) {
+		snprintf(status, sizeof status, ":%.250s", app.vim.cmd_buf);
 	} else {
-		const char *fname = file.name ? file.name : "(no file)";
-		int box_num = focused_box >= 0 ? focused_box + 1 : 0;
-
-		/* cursor line:col for focused box */
+		const char *fname = app.file.name ? app.file.name : "(no file)";
+		int box_num = app.focused_box >= 0 ? app.focused_box + 1 : 0;
 		int cur_line = 0, cur_col = 0;
 		const char *box_title = "";
 		const char *tag_str = "";
-		if (focused_box >= 0 && focused_box < file.box_count) {
-			struct Box *fb = &file.boxes[focused_box];
+
+		if (app.focused_box >= 0 && app.focused_box < app.file.box_count) {
+			struct Box *fb = &app.file.boxes[app.focused_box];
 			box_title = fb->title ? fb->title : "";
 			int pos = fb->body.gap_start;
 			int blen = gap_len(&fb->body);
-			cur_line = 1;
-			cur_col = 1;
+			cur_line = 1; cur_col = 1;
 			for (int ci = 0; ci < pos && ci < blen; ci++) {
-				if (gap_char_at(&fb->body, ci) == '\n') {
-					cur_line++;
-					cur_col = 1;
-				} else {
-					cur_col++;
-				}
+				if (gap_char_at(&fb->body, ci) == '\n') { cur_line++; cur_col = 1; }
+				else cur_col++;
 			}
 			switch (fb->tag) {
 			case TAG_IDEA:      tag_str = " [idea]"; break;
-			case TAG_TODO:       tag_str = " [todo]"; break;
-			case TAG_REFERENCE:  tag_str = " [ref]"; break;
+			case TAG_TODO:      tag_str = " [todo]"; break;
+			case TAG_REFERENCE: tag_str = " [ref]"; break;
 			default: break;
 			}
 		}
 
-		if (editing && focused_box >= 0) {
+		if (app.editing && app.focused_box >= 0) {
 			snprintf(status, sizeof status,
 				" %s | %.20s%s | %d:%d | %s %d/%d %s",
-				mode_str, box_title, tag_str,
-				cur_line, cur_col,
-				fname, box_num, file.box_count,
-				file.dirty ? "[+]" : "");
+				mode_str, box_title, tag_str, cur_line, cur_col,
+				fname, box_num, app.file.box_count,
+				app.file.dirty ? "[+]" : "");
 		} else {
 			snprintf(status, sizeof status,
 				" %s | %s | box %d/%d %s",
-				mode_str, fname, box_num, file.box_count,
-				file.dirty ? "[+]" : "");
+				mode_str, fname, box_num, app.file.box_count,
+				app.file.dirty ? "[+]" : "");
 		}
 	}
 
 	plat_move(rows - 1, 0);
-	int slen = strlen(status);
+	int slen = (int)strlen(status);
 	plat_addstr(status, slen, ATTR_REVERSE);
-	for (int x = slen; x < cols; x++)
-		plat_addch(' ', ATTR_REVERSE);
+	for (int x = slen; x < cols; x++) plat_addch(' ', ATTR_REVERSE);
 }
 
 static void redraw(void)
 {
-	plat_clear();
-	plat_hide_cursor(); /* hide cursor during draw */
+	int vp_col = px_to_col(app.vp_x);
+	int vp_row = px_to_row(app.vp_y);
 
-	for (int i = 0; i < file.box_count; i++) {
-		struct Box *b = &file.boxes[i];
+	plat_clear();
+	plat_hide_cursor();
+
+	for (int i = 0; i < app.file.box_count; i++) {
+		struct Box *b = &app.file.boxes[i];
 		int r = px_to_row(b->y) - vp_row;
 		int c = px_to_col(b->x) - vp_col;
 		int w = px_to_col(b->w);
@@ -360,16 +275,17 @@ static void redraw(void)
 		if (w < 6) w = 6;
 		if (h < 4) h = 4;
 
-		int is_focused = (i == focused_box);
-		draw_box_border(r, c, w, h, is_focused, b->tag);
+		int is_focused = (i == app.focused_box);
+		int is_hovered = (i == app.hovered_box);
+		draw_box_border(r, c, w, h, is_focused, is_hovered, b->tag);
 
-		if (is_focused)
+		if (is_focused && app.editing)
 			draw_editing_box(b, r, c, w, h);
 		else
-			draw_box_content(b, r, c, w, h, 0);
+			draw_box_content(b, r, c, w, h, is_focused);
 	}
 
-	if (file.box_count == 0) {
+	if (app.file.box_count == 0) {
 		plat_move(1, 2);
 		plat_addstr("No boxes yet.  Type  :newbox  then Enter.", -1, ATTR_DIM);
 		plat_move(2, 2);
@@ -380,239 +296,6 @@ static void redraw(void)
 	plat_refresh();
 }
 
-/* --- box hit testing ----------------------------------------------------- */
-
-static int box_at_cell(int row, int col)
-{
-	/* check in reverse order (later boxes draw on top) */
-	for (int i = file.box_count - 1; i >= 0; i--) {
-		struct Box *b = &file.boxes[i];
-		int r = px_to_row(b->y) - vp_row;
-		int c = px_to_col(b->x) - vp_col;
-		int w = px_to_col(b->w);
-		int h = px_to_row(b->h);
-		if (w < 6) w = 6;
-		if (h < 4) h = 4;
-
-		if (row >= r && row < r + h && col >= c && col < c + w)
-			return i;
-	}
-	return -1;
-}
-
-/* --- jump history -------------------------------------------------------- */
-
-static void jump_push(int box, int pos)
-{
-	if (jumphist.count > 0) {
-		int prev = jumphist.cursor;
-		if (prev >= 0 && prev < jumphist.count &&
-		    jumphist.ring[prev].box == box)
-			return; /* don't push duplicate */
-	}
-	/* truncate forward */
-	jumphist.count = jumphist.cursor + 1;
-	if (jumphist.count >= JUMP_MAX) {
-		memmove(&jumphist.ring[0], &jumphist.ring[1],
-			(JUMP_MAX - 1) * sizeof(jumphist.ring[0]));
-		jumphist.count = JUMP_MAX - 1;
-	}
-	jumphist.ring[jumphist.count].box = box;
-	jumphist.ring[jumphist.count].pos = pos;
-	jumphist.cursor = jumphist.count;
-	jumphist.count++;
-}
-
-/* --- tag cycling --------------------------------------------------------- */
-
-static void cycle_tag(struct Box *b)
-{
-	switch (b->tag) {
-	case TAG_NONE:      b->tag = TAG_IDEA; break;
-	case TAG_IDEA:      b->tag = TAG_TODO; break;
-	case TAG_TODO:       b->tag = TAG_REFERENCE; break;
-	case TAG_REFERENCE:  b->tag = TAG_NONE; break;
-	}
-}
-
-/* forward declarations */
-static void focus_box(int idx);
-
-/* --- box helpers --------------------------------------------------------- */
-
-static void box_free_contents(struct Box *b)
-{
-	gap_free(&b->body);
-	undo_free(&b->undo);
-	free(b->title);
-	for (int i = 0; i < b->custom_count; i++) {
-		free(b->custom[i].key);
-		free(b->custom[i].value);
-	}
-}
-
-static void do_delete_box(void)
-{
-	if (focused_box < 0 || focused_box >= file.box_count) return;
-	int del = focused_box;
-	box_free_contents(&file.boxes[del]);
-	if (del < file.box_count - 1)
-		memmove(&file.boxes[del], &file.boxes[del + 1],
-			(file.box_count - del - 1) * sizeof(struct Box));
-	file.box_count--;
-	editing = 0;
-	focused_box = del < file.box_count ? del : file.box_count - 1;
-	/* fix marks pointing to moved/deleted boxes */
-	for (int i = 0; i < 26; i++) {
-		if (marks[i].box == del) marks[i].box = -1;
-		else if (marks[i].box > del) marks[i].box--;
-	}
-	file.dirty = 1;
-}
-
-static void do_dup_box(void)
-{
-	if (focused_box < 0 || focused_box >= file.box_count) return;
-	if (file.box_count >= MAX_BOXES) return;
-	struct Box *src = &file.boxes[focused_box];
-	struct Box *nb = &file.boxes[file.box_count];
-	box_init_new(nb, src->x + 20, src->y + 20, cfg_box_w, cfg_box_h);
-	char *content = gap_contents(&src->body);
-	gap_free(&nb->body);
-	gap_init(&nb->body, content, strlen(content));
-	free(content);
-	free(nb->title);
-	nb->title = strdup(src->title);
-	nb->tag = src->tag;
-	file.box_count++;
-	focus_box(file.box_count - 1);
-	file.dirty = 1;
-}
-
-/* --- viewport auto-scroll ------------------------------------------------ */
-
-static void auto_scroll_to_box(int idx)
-{
-	if (idx < 0 || idx >= file.box_count) return;
-	struct Box *b = &file.boxes[idx];
-	int r = px_to_row(b->y);
-	int c = px_to_col(b->x);
-	int bh = px_to_row(b->h);
-	int bw = px_to_col(b->w);
-	if (bh < 4) bh = 4;
-	if (bw < 6) bw = 6;
-	int rows = plat_rows() - 1;
-	int cols = plat_cols();
-
-	if (r - vp_row < 0) vp_row = r;
-	else if (r + bh - vp_row > rows) vp_row = r + bh - rows;
-	if (c - vp_col < 0) vp_col = c;
-	else if (c + bw - vp_col > cols) vp_col = c + bw - cols;
-}
-
-/* --- focus helper -------------------------------------------------------- */
-
-static void focus_box(int idx)
-{
-	if (idx == focused_box) return;
-	if (focused_box >= 0)
-		jump_push(focused_box, file.boxes[focused_box].body.gap_start);
-	focused_box = idx;
-	if (idx >= 0) {
-		editing = 1;
-		if (vim.mode == MODE_INSERT)
-			vim.mode = MODE_NORMAL; /* reset to NORMAL on box change */
-		jump_push(idx, file.boxes[idx].body.gap_start);
-		auto_scroll_to_box(idx);
-	} else {
-		editing = 0;
-		plat_hide_cursor();
-	}
-}
-
-/* --- mouse hit zones ----------------------------------------------------- */
-
-/* Returns: 0 = body, 1 = border (drag), 2 = right edge (resize), 3 = title (drag) */
-static int hit_zone(int box_idx, int row, int col)
-{
-	struct Box *b = &file.boxes[box_idx];
-	int r = px_to_row(b->y) - vp_row;
-	int c = px_to_col(b->x) - vp_col;
-	int w = px_to_col(b->w);
-	int h = px_to_row(b->h);
-	if (w < 6) w = 6;
-	if (h < 4) h = 4;
-
-	/* right edge: last 2 columns of box */
-	if (col >= c + w - 2 && col <= c + w - 1)
-		return 2;
-	/* top/bottom border */
-	if (row == r || row == r + h - 1)
-		return 1;
-	/* left border */
-	if (col == c)
-		return 1;
-	/* title row (r + 1) — draggable */
-	if (row == r + 1)
-		return 3;
-	return 0;
-}
-
-/* --- navigation ---------------------------------------------------------- */
-
-/* Simple reading order: sort by y then x */
-static int reading_order_next(int cur)
-{
-	if (file.box_count == 0) return -1;
-	if (cur < 0) return 0;
-	return (cur + 1) % file.box_count;
-}
-
-static int reading_order_prev(int cur)
-{
-	if (file.box_count == 0) return -1;
-	if (cur < 0) return file.box_count - 1;
-	return (cur - 1 + file.box_count) % file.box_count;
-}
-
-/* Spatial navigation: find nearest box in direction */
-static int spatial_nav(int cur, int dir_key)
-{
-	if (cur < 0 || file.box_count < 2) return cur;
-
-	struct Box *from = &file.boxes[cur];
-	int fx = from->x + from->w / 2;
-	int fy = from->y + from->h / 2;
-	int best = -1;
-	int best_dist = 999999;
-
-	for (int i = 0; i < file.box_count; i++) {
-		if (i == cur) continue;
-		struct Box *to = &file.boxes[i];
-		int tx = to->x + to->w / 2;
-		int ty = to->y + to->h / 2;
-		int dx = tx - fx;
-		int dy = ty - fy;
-
-		/* check direction */
-		int ok = 0;
-		switch (dir_key) {
-		case 'h': ok = (dx < 0); break;
-		case 'l': ok = (dx > 0); break;
-		case 'k': ok = (dy < 0); break;
-		case 'j': ok = (dy > 0); break;
-		}
-		if (!ok) continue;
-
-		int dist = dx * dx + dy * dy;
-		if (dist < best_dist) {
-			best_dist = dist;
-			best = i;
-		}
-	}
-	return best >= 0 ? best : cur;
-}
-
 /* --- main ---------------------------------------------------------------- */
 
 int main(int argc, char **argv)
@@ -620,30 +303,25 @@ int main(int argc, char **argv)
 	int key;
 	struct MouseEvent mouse;
 
-	/* load runtime config (overrides config.h defaults) */
 	conf_ensure_dir();
 	conf_load();
 
-	{
-		const char *path = argc >= 2 ? argv[1] : "notes.md";
-		if (file_parse(&file, path) != 0)
-			file_init_empty(&file, path);
-	}
+	app_init(&app, argc >= 2 ? argv[1] : "notes.md");
 
-	vim_init(&vim);
-	for (int i = 0; i < 26; i++) marks[i].box = -1;
-	memset(&jumphist, 0, sizeof jumphist);
 	plat_init();
 
-	if (file.box_count > 0)
-		focused_box = 0;
+	/* tell app our viewport size in file-pixel coords */
+	app.view_w = plat_cols() * cfg_cell_w;
+	app.view_h = (plat_rows() - 1) * cfg_cell_h; /* -1 for status bar */
 
 	redraw();
 
-	while (running) {
+	while (app.running) {
 		int result = plat_getinput(&key, &mouse, 50);
 
 		if (result == INPUT_RESIZE) {
+			app.view_w = plat_cols() * cfg_cell_w;
+			app.view_h = (plat_rows() - 1) * cfg_cell_h;
 			redraw();
 			continue;
 		}
@@ -651,463 +329,32 @@ int main(int argc, char **argv)
 			continue;
 
 		if (result == INPUT_MOUSE) {
+			/* convert cell coords to file-pixel coords */
+			int vp_col = px_to_col(app.vp_x);
+			int vp_row = px_to_row(app.vp_y);
+			int px = col_to_px(mouse.col + vp_col);
+			int py = row_to_px(mouse.row + vp_row);
+
 			if (mouse.pressed && mouse.button == 0) {
-				if (dragging) {
-					/* already dragging — update position */
-					goto do_drag;
-				}
-				int hit = box_at_cell(mouse.row, mouse.col);
-				if (hit >= 0) {
-					int zone = hit_zone(hit, mouse.row, mouse.col);
-					if (zone == 2) {
-						/* right edge → start resize */
-						dragging = 2;
-						drag_box = hit;
-						focus_box(hit);
-					} else if (zone == 3 && hit == focused_box && !dragging) {
-						/* title of focused box → edit title */
-						editing_title = 1;
-						struct Box *tb = &file.boxes[hit];
-						title_len = snprintf(title_buf, sizeof title_buf, "%s", tb->title);
-						title_cursor = title_len;
-					} else if (zone == 1 || zone == 3) {
-						/* border or title of unfocused box → drag */
-						dragging = 1;
-						drag_box = hit;
-						focus_box(hit);
-						struct Box *b = &file.boxes[hit];
-						drag_ox = mouse.col - (px_to_col(b->x) - vp_col);
-						drag_oy = mouse.row - (px_to_row(b->y) - vp_row);
-					} else {
-						/* body interior → focus box */
-						focus_box(hit);
-						editing_title = 0;
-					}
-				} else {
-					/* click on empty canvas → create box */
-					if (file.box_count < MAX_BOXES) {
-						struct Box *nb = &file.boxes[file.box_count];
-						int px = (mouse.col + vp_col) * cfg_cell_w;
-						int py = (mouse.row + vp_row) * cfg_cell_h;
-						box_init_new(nb, px, py, cfg_box_w, cfg_box_h);
-						file.box_count++;
-						focused_box = file.box_count - 1;
-						editing = 1;
-						vim.mode = MODE_INSERT;
-						file.dirty = 1;
-					}
-				}
-			} else if (!mouse.pressed && dragging) {
-				/* mouse release → end drag/resize */
-				dragging = 0;
-				drag_box = -1;
-				file.dirty = 1;
-			} else if (mouse.pressed && dragging) {
-do_drag:
-				if (drag_box >= 0 && drag_box < file.box_count) {
-					struct Box *b = &file.boxes[drag_box];
-					if (dragging == 1) {
-						/* move: set box position from mouse - offset */
-						int new_col = mouse.col - drag_ox + vp_col;
-						int new_row = mouse.row - drag_oy + vp_row;
-						if (new_col < 0) new_col = 0;
-						if (new_row < 0) new_row = 0;
-						b->x = new_col * cfg_cell_w;
-						b->y = new_row * cfg_cell_h;
-					} else if (dragging == 2) {
-						/* resize: right edge follows mouse */
-						int box_col = px_to_col(b->x) - vp_col;
-						int new_w = mouse.col - box_col + 1;
-						if (new_w < 6) new_w = 6;
-						b->w = new_w * cfg_cell_w;
-					}
-				}
+				if (app.dragging)
+					app_mouse_move(&app, px, py);
+				else
+					app_mouse_down(&app, px, py, mouse.button);
+			} else if (!mouse.pressed && app.dragging) {
+				app_mouse_up(&app, px, py, mouse.button);
+			} else if (mouse.pressed && app.dragging) {
+				app_mouse_move(&app, px, py);
 			}
 			redraw();
 			continue;
 		}
 
 		/* INPUT_KEY */
-
-		/* --- command mode (works with or without focused box) --- */
-		if (vim.mode == MODE_COMMAND) {
-			vim_keypress(&vim,
-				focused_box >= 0 ? &file.boxes[focused_box].body : NULL,
-				focused_box >= 0 ? &file.boxes[focused_box].undo : NULL,
-				key);
-
-			switch (vim.result) {
-			case VIM_RESULT_SAVE:
-				file_save(&file);
-				file.dirty = 0;
-				break;
-			case VIM_RESULT_QUIT:
-				editing = 0;
-				plat_hide_cursor();
-				break;
-			case VIM_RESULT_SAVEQUIT:
-				file_save(&file);
-				file.dirty = 0;
-				editing = 0;
-				plat_hide_cursor();
-				break;
-			case VIM_RESULT_NEWBOX:
-				if (file.box_count < MAX_BOXES) {
-					struct Box *nb = &file.boxes[file.box_count];
-					int nx = 40, ny = 40;
-					if (focused_box >= 0) {
-						nx = file.boxes[focused_box].x + file.boxes[focused_box].w + 20;
-						ny = file.boxes[focused_box].y;
-					} else if (file.box_count > 0) {
-						nx = file.boxes[file.box_count - 1].x;
-						ny = file.boxes[file.box_count - 1].y + file.boxes[file.box_count - 1].h + 20;
-					}
-					box_init_new(nb, nx, ny, cfg_box_w, cfg_box_h);
-					file.box_count++;
-					focused_box = file.box_count - 1;
-					editing = 1;
-					vim.mode = MODE_INSERT;
-					file.dirty = 1;
-				}
-				break;
-			default:
-				break;
-			}
-
-			if (vim.mode == MODE_NORMAL)
-				editing = (focused_box >= 0) ? editing : 0;
-
-			redraw();
-			continue;
-		}
-
-		/* --- title editing mode --- */
-		if (editing_title && focused_box >= 0) {
-			switch (key) {
-			case KEY_ESC:
-			case '\r':
-			case '\n':
-				/* commit title */
-				title_buf[title_len] = '\0';
-				free(file.boxes[focused_box].title);
-				file.boxes[focused_box].title = strdup(title_buf);
-				file.boxes[focused_box].title_is_default = 0;
-				editing_title = 0;
-				file.dirty = 1;
-				break;
-			case KEY_BACKSPACE:
-				if (title_cursor > 0) {
-					memmove(title_buf + title_cursor - 1,
-						title_buf + title_cursor,
-						title_len - title_cursor);
-					title_cursor--;
-					title_len--;
-				}
-				break;
-			case KEY_LEFT:
-				if (title_cursor > 0) title_cursor--;
-				break;
-			case KEY_RIGHT:
-				if (title_cursor < title_len) title_cursor++;
-				break;
-			case KEY_HOME:
-				title_cursor = 0;
-				break;
-			case KEY_END:
-				title_cursor = title_len;
-				break;
-			default:
-				if (key >= 32 && key < 127 && title_len < (int)sizeof(title_buf) - 1) {
-					memmove(title_buf + title_cursor + 1,
-						title_buf + title_cursor,
-						title_len - title_cursor);
-					title_buf[title_cursor] = key;
-					title_cursor++;
-					title_len++;
-				}
-				break;
-			}
-			redraw();
-			continue;
-		}
-
-		/* --- leader key dispatch (in editing normal mode) --- */
-		if (leader_pending && editing && focused_box >= 0) {
-			struct Box *b = &file.boxes[focused_box];
-			leader_pending = 0;
-			switch (key) {
-			case 'b': /* bold */
-				edit_toggle_wrap(&b->body, &b->undo, b->body.gap_start, b->body.gap_start, "**");
-				file.dirty = 1;
-				break;
-			case 'i': /* italic */
-				edit_toggle_wrap(&b->body, &b->undo, b->body.gap_start, b->body.gap_start, "*");
-				file.dirty = 1;
-				break;
-			case '1': /* checkbox */
-				edit_checkbox_rotate(&b->body, &b->undo, b->body.gap_start);
-				file.dirty = 1;
-				break;
-			case 't': /* cycle tag */
-				cycle_tag(b);
-				file.dirty = 1;
-				break;
-			case 'w': /* save */
-				file_save(&file);
-				file.dirty = 0;
-				break;
-			case 'n': /* new box */
-				if (file.box_count < MAX_BOXES) {
-					struct Box *nb = &file.boxes[file.box_count];
-					box_init_new(nb, b->x + b->w + 20, b->y, cfg_box_w, cfg_box_h);
-					file.box_count++;
-					focus_box(file.box_count - 1);
-					editing = 1;
-					vim.mode = MODE_INSERT;
-					file.dirty = 1;
-				}
-				break;
-			case 'd': /* duplicate box */
-				do_dup_box();
-				break;
-			case 'D': /* delete box */
-				do_delete_box();
-				break;
-			}
-			redraw();
-			continue;
-		}
-
-		/* --- box editing (vim normal/insert inside a box) --- */
-		if (editing && focused_box >= 0) {
-			struct Box *b = &file.boxes[focused_box];
-
-			/* leader key (configurable, default space) */
-			if (vim.mode == MODE_NORMAL && key == cfg_leader) {
-				leader_pending = 1;
-				redraw();
-				continue;
-			}
-
-			/* heading/list nav in normal mode */
-			if (vim.mode == MODE_NORMAL) {
-				/* ]] and [[ need two-key handling... simplified: use ]h/[h */
-				if (key == KEY_CTRL('o')) {
-					/* jump back */
-					if (jumphist.cursor > 0) {
-						jumphist.cursor--;
-						int bi = jumphist.ring[jumphist.cursor].box;
-						if (bi >= 0 && bi < file.box_count) {
-							focused_box = bi;
-							gap_move(&file.boxes[bi].body,
-								jumphist.ring[jumphist.cursor].pos);
-							auto_scroll_to_box(bi);
-						}
-					}
-					redraw();
-					continue;
-				}
-				if (key == KEY_CTRL('i')) {
-					/* jump forward */
-					if (jumphist.cursor < jumphist.count - 1) {
-						jumphist.cursor++;
-						int bi = jumphist.ring[jumphist.cursor].box;
-						if (bi >= 0 && bi < file.box_count) {
-							focused_box = bi;
-							gap_move(&file.boxes[bi].body,
-								jumphist.ring[jumphist.cursor].pos);
-							auto_scroll_to_box(bi);
-						}
-					}
-					redraw();
-					continue;
-				}
-			}
-
-			/* ]]/[[, ]b/[b, ]l/[l — bracket nav (two-key, handled here) */
-			if (vim.mode == MODE_NORMAL && (key == ']' || key == '[')) {
-				int dir = key;
-				int key2;
-				struct MouseEvent dummy;
-				if (plat_getinput(&key2, &dummy, 500) == INPUT_KEY) {
-					if (key2 == ']' || key2 == '[') {
-						/* ]] or [[ — heading nav */
-						int np = (dir == ']')
-							? edit_next_heading(&b->body, b->body.gap_start)
-							: edit_prev_heading(&b->body, b->body.gap_start);
-						gap_move(&b->body, np);
-					} else if (key2 == 'b') {
-						/* ]b/[b — box nav */
-						int next = (dir == ']')
-							? reading_order_next(focused_box)
-							: reading_order_prev(focused_box);
-						if (next >= 0) {
-							editing = 0;
-							plat_hide_cursor();
-							focus_box(next);
-						}
-					} else if (key2 == 'l') {
-						/* ]l/[l — list nav */
-						int np = (dir == ']')
-							? edit_next_list_item(&b->body, b->body.gap_start)
-							: edit_prev_list_item(&b->body, b->body.gap_start);
-						gap_move(&b->body, np);
-					} else if (key2 == 'h') {
-						/* ]h/[h — heading nav (alias) */
-						int np = (dir == ']')
-							? edit_next_heading(&b->body, b->body.gap_start)
-							: edit_prev_heading(&b->body, b->body.gap_start);
-						gap_move(&b->body, np);
-					}
-				}
-				redraw();
-				continue;
-			}
-
-			vim_keypress(&vim, &b->body, &b->undo, key);
-
-			/* handle results */
-			if (vim.result == VIM_RESULT_SET_MARK) {
-				int idx = vim.mark_letter - 'a';
-				marks[idx].box = focused_box;
-				marks[idx].pos = b->body.gap_start;
-			} else if (vim.result == VIM_RESULT_JUMP_MARK) {
-				int idx = vim.mark_letter - 'a';
-				if (marks[idx].box >= 0 && marks[idx].box < file.box_count) {
-					focus_box(marks[idx].box);
-					gap_move(&file.boxes[marks[idx].box].body, marks[idx].pos);
-				}
-			} else if (vim.result == VIM_RESULT_ZZ) {
-				file_save(&file);
-				file.dirty = 0;
-				editing = 0;
-				plat_hide_cursor();
-			} else if (vim.result == VIM_RESULT_ZQ) {
-				editing = 0;
-				plat_hide_cursor();
-			} else if (vim.result == VIM_RESULT_SET_FIELD) {
-				/* :set key value — parse from cmd_buf */
-				char *arg = vim.cmd_buf + 4;
-				char *sp = strchr(arg, ' ');
-				if (sp && b->custom_count < MAX_CUSTOM_FIELDS) {
-					*sp = '\0';
-					b->custom[b->custom_count].key = strdup(arg);
-					b->custom[b->custom_count].value = strdup(sp + 1);
-					b->custom_count++;
-					file.dirty = 1;
-				}
-			} else if (vim.result == VIM_RESULT_SET_TAG) {
-				char *arg = vim.cmd_buf + 4;
-				if (strcmp(arg, "idea") == 0) b->tag = TAG_IDEA;
-				else if (strcmp(arg, "todo") == 0) b->tag = TAG_TODO;
-				else if (strcmp(arg, "reference") == 0) b->tag = TAG_REFERENCE;
-				else b->tag = TAG_NONE;
-				file.dirty = 1;
-			}
-
-			if (vim.result == VIM_RESULT_SAVE) {
-				file_save(&file);
-				file.dirty = 0;
-			} else if (vim.result == VIM_RESULT_QUIT) {
-				editing = 0;
-				plat_hide_cursor();
-			} else if (vim.result == VIM_RESULT_SAVEQUIT) {
-				file_save(&file);
-				file.dirty = 0;
-				editing = 0;
-				plat_hide_cursor();
-			} else if (vim.result == VIM_RESULT_DELBOX) {
-				do_delete_box();
-			} else if (vim.result == VIM_RESULT_DUPBOX) {
-				do_dup_box();
-			}
-
-			if (vim.mode == MODE_NORMAL && key == KEY_ESC) {
-				editing = 0;
-				plat_hide_cursor();
-			}
-
-			if (vim.result == VIM_RESULT_NONE && vim.mode == MODE_INSERT)
-				file.dirty = 1;
-
-			/* auto-grow box width to fit longest line (up to cfg_max_box_cols) */
-			{
-				int max_line = 0;
-				int cur_line = 0;
-				int blen = gap_len(&b->body);
-				for (int ci = 0; ci < blen; ci++) {
-					if (gap_char_at(&b->body, ci) == '\n') {
-						if (cur_line > max_line) max_line = cur_line;
-						cur_line = 0;
-					} else {
-						cur_line++;
-					}
-				}
-				if (cur_line > max_line) max_line = cur_line;
-				/* +2 for box borders, +1 for padding */
-				int need_cols = max_line + 3;
-				if (need_cols > cfg_max_box_cols) need_cols = cfg_max_box_cols;
-				int need_px = need_cols * cfg_cell_w;
-				if (need_px > b->w) b->w = need_px;
-			}
-
-			redraw();
-			continue;
-		}
-
-		/* --- canvas-level keys (not editing a box) --- */
-		switch (key) {
-		case 'q':
-			if (file.dirty)
-				file_save(&file);
-			running = 0;
-			break;
-
-		case '\r':
-		case '\n':
-		case 'i':
-			if (focused_box >= 0) {
-				editing = 1;
-				vim.mode = (key == 'i') ? MODE_INSERT : MODE_NORMAL;
-			}
-			break;
-
-		case KEY_ESC:
-			focused_box = -1;
-			break;
-
-		case 'j':
-		case KEY_DOWN:
-			focus_box(reading_order_next(focused_box));
-			break;
-		case 'k':
-		case KEY_UP:
-			focus_box(reading_order_prev(focused_box));
-			break;
-
-		case KEY_CTRL('h'):
-			focus_box(spatial_nav(focused_box, 'h'));
-			break;
-		case KEY_CTRL('n'):
-			focus_box(spatial_nav(focused_box, 'j'));
-			break;
-		case KEY_CTRL('k'):
-			focus_box(spatial_nav(focused_box, 'k'));
-			break;
-		case KEY_CTRL('l'):
-			focus_box(spatial_nav(focused_box, 'l'));
-			break;
-
-		case ':':
-			vim.mode = MODE_COMMAND;
-			vim.cmd_len = 0;
-			vim.cmd_buf[0] = '\0';
-			break;
-		}
-
+		app_key(&app, key);
 		redraw();
 	}
 
 	plat_deinit();
+	app_destroy(&app);
 	return 0;
 }

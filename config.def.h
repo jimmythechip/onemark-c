@@ -2,51 +2,100 @@
  *
  * Copy this file to config.h and edit to taste. Recompile after changes.
  * Runtime config file (~/.config/onemark/config) overrides these at startup.
+ *
+ * Include this from exactly ONE .c file with #define CONFIG_IMPL before
+ * including, to place the variable definitions. All other files get externs.
  */
 
+#ifdef CONFIG_IMPL
+#define CFG_DEF
+#else
+#define CFG_DEF extern
+#endif
+
 /* vim leader key (single character) */
-char cfg_leader = ' ';
+CFG_DEF char cfg_leader
+#ifdef CONFIG_IMPL
+	= ' '
+#endif
+;
 
 /* pixels per character cell for coordinate scaling from Electron format */
-int cfg_cell_w = 8;
-int cfg_cell_h = 16;
+CFG_DEF int cfg_cell_w
+#ifdef CONFIG_IMPL
+	= 8
+#endif
+;
+CFG_DEF int cfg_cell_h
+#ifdef CONFIG_IMPL
+	= 16
+#endif
+;
 
 /* default box size in pixels (for new boxes) */
-int cfg_box_w = 320;
-int cfg_box_h = 120;
+CFG_DEF int cfg_box_w
+#ifdef CONFIG_IMPL
+	= 320
+#endif
+;
+CFG_DEF int cfg_box_h
+#ifdef CONFIG_IMPL
+	= 120
+#endif
+;
 
 /* maximum undo history entries per box */
-int cfg_undo_max = 100;
+CFG_DEF int cfg_undo_max
+#ifdef CONFIG_IMPL
+	= 100
+#endif
+;
 
 /* auto-save debounce in milliseconds (0 = disabled) */
-int cfg_save_debounce_ms = 500;
+CFG_DEF int cfg_save_debounce_ms
+#ifdef CONFIG_IMPL
+	= 500
+#endif
+;
 
 /* maximum box width in terminal columns (auto-grow stops here) */
-int cfg_max_box_cols = 80;
+CFG_DEF int cfg_max_box_cols
+#ifdef CONFIG_IMPL
+	= 80
+#endif
+;
 
 /* tag definitions: name + ANSI color (0-7) */
-const struct { const char *name; int color; } cfg_tags[] = {
-	{ "none",      7 },  /* white */
-	{ "idea",      4 },  /* blue */
-	{ "todo",      3 },  /* yellow */
-	{ "reference", 5 },  /* magenta */
-};
+CFG_DEF const struct { const char *name; int color; } cfg_tags[]
+#ifdef CONFIG_IMPL
+	= {
+		{ "none",      7 },  /* white */
+		{ "idea",      4 },  /* blue */
+		{ "todo",      3 },  /* yellow */
+		{ "reference", 5 },  /* magenta */
+	}
+#endif
+;
 
 /*
  * Keybindings for leader-key dispatch (Space + <key>).
- * action values are single chars dispatched in the leader handler.
  */
-const struct { int key; int action; } cfg_leader_bindings[] = {
-	{ 'b', 'b' },  /* bold */
-	{ 'i', 'i' },  /* italic */
-	{ '1', '1' },  /* checkbox rotate */
-	{ 't', 't' },  /* cycle tag */
-	{ 'w', 'w' },  /* save */
-	{ 'n', 'n' },  /* new box */
-	{ 'd', 'd' },  /* duplicate box */
-	{ 'D', 'D' },  /* delete box */
-	{ 'p', 'p' },  /* peek (reserved) */
-	{ 's', 's' },  /* easymotion (reserved) */
-};
-#define CFG_LEADER_BIND_COUNT \
-	(int)(sizeof(cfg_leader_bindings) / sizeof(cfg_leader_bindings[0]))
+CFG_DEF const struct { int key; int action; } cfg_leader_bindings[]
+#ifdef CONFIG_IMPL
+	= {
+		{ 'b', 'b' },  /* bold */
+		{ 'i', 'i' },  /* italic */
+		{ '1', '1' },  /* checkbox rotate */
+		{ 't', 't' },  /* cycle tag */
+		{ 'w', 'w' },  /* save */
+		{ 'n', 'n' },  /* new box */
+		{ 'd', 'd' },  /* duplicate box */
+		{ 'D', 'D' },  /* delete box */
+		{ 'p', 'p' },  /* peek (reserved) */
+		{ 's', 's' },  /* easymotion (reserved) */
+	}
+#endif
+;
+#define CFG_LEADER_BIND_COUNT 10
+
+#undef CFG_DEF

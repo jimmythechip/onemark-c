@@ -1,4 +1,6 @@
+#ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L
+#endif
 /* onemark — file format parse/serialize
  *
  * Hand-written line-by-line parser for the OneMark .md format.
