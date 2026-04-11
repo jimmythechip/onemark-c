@@ -25,6 +25,11 @@ static HDC memdc;
 static HBITMAP membmp;
 static int mem_w, mem_h;
 
+/* cursor blink */
+static int cursor_visible = 1;
+#define CURSOR_BLINK_TIMER 1
+#define CURSOR_BLINK_MS    530
+
 /* --- colors -------------------------------------------------------------- */
 
 #define COL_BG      RGB(255, 255, 255)
@@ -239,68 +244,80 @@ static void draw_box(HDC hdc, struct Box *b, int idx)
 	SetBkMode(hdc, TRANSPARENT);
 	SetTextColor(hdc, COL_FG);
 
-	char *line = content;
-	int line_num = 0;
-	int draw_row = 0;
+	int max_chars = body_w / font_w;
+	if (max_chars < 1) max_chars = 1;
+	int cursor_drawn = 0;
+
+	/* walk content line by line */
 	int char_off = 0;
+	int line_num = 0;
+	char *ptr = content;
 
-	while (line && *line && draw_row < max_rows + scroll) {
-		char *nl = strchr(line, '\n');
-		int ll = nl ? (int)(nl - line) : (int)strlen(line);
+	for (;;) {
+		/* find end of current line */
+		char *nl = ptr ? strchr(ptr, '\n') : NULL;
+		int ll = 0;
+		if (ptr) ll = nl ? (int)(nl - ptr) : (int)strlen(ptr);
 
-		if (line_num >= scroll && draw_row - scroll < max_rows) {
-			int row_idx = draw_row - scroll;
+		/* only render lines within scroll window */
+		if (line_num >= scroll && line_num - scroll < max_rows) {
+			int row_idx = line_num - scroll;
 			int ty = body_y + row_idx * font_h;
 
-			/* draw visual highlight background */
+			/* visual highlight background */
 			if (vis_from >= 0) {
-				int line_start_off = char_off;
-				int line_end_off = char_off + ll;
-				int hl_start = vis_from > line_start_off ? vis_from - line_start_off : 0;
-				int hl_end = vis_to < line_end_off ? vis_to - line_start_off : ll;
-				if (hl_start < ll && hl_end > 0 && hl_end > hl_start) {
-					fill_rect(hdc, body_x + hl_start * font_w, ty,
-						  (hl_end - hl_start) * font_w, font_h, COL_SELECT);
-				}
+				int ls = char_off, le = char_off + ll;
+				int hs = vis_from > ls ? vis_from - ls : 0;
+				int he = vis_to < le ? vis_to - ls : ll;
+				if (hs < ll && he > 0 && he > hs)
+					fill_rect(hdc, body_x + hs * font_w, ty,
+						  (he - hs) * font_w, font_h, COL_SELECT);
 			}
 
 			/* draw text */
-			int max_chars = body_w / font_w;
 			int draw_len = ll < max_chars ? ll : max_chars;
 			if (draw_len > 0) {
 				WCHAR wbuf[1024];
-				int wlen = MultiByteToWideChar(CP_UTF8, 0, line, draw_len, wbuf, 1024);
+				int wlen = MultiByteToWideChar(CP_UTF8, 0, ptr, draw_len, wbuf, 1024);
 				TextOutW(hdc, body_x, ty, wbuf, wlen);
 			}
 
-			/* draw cursor */
-			if (editing && char_off <= cursor_pos &&
-			    cursor_pos <= char_off + ll) {
+			/* draw cursor if on this line */
+			if (editing && cursor_visible &&
+			    cursor_pos >= char_off && cursor_pos <= char_off + ll) {
 				int cx = cursor_pos - char_off;
 				int cursor_x = body_x + cx * font_w;
 				if (app.vim.mode == MODE_INSERT) {
-					/* bar cursor */
+					/* bar cursor: 2px wide, accent color */
 					fill_rect(hdc, cursor_x, ty, 2, font_h, COL_ACCENT);
 				} else {
-					/* block cursor */
-					char under = (cursor_pos < blen && content[cursor_pos] != '\n')
-						? content[cursor_pos] : ' ';
+					/* block cursor: full cell, inverted char */
 					fill_rect(hdc, cursor_x, ty, font_w, font_h, COL_FG);
-					if (under != ' ') {
+					if (cx < ll) {
 						WCHAR wc;
-						MultiByteToWideChar(CP_UTF8, 0, &under, 1, &wc, 1);
+						MultiByteToWideChar(CP_UTF8, 0, ptr + cx, 1, &wc, 1);
 						SetTextColor(hdc, COL_BG);
 						TextOutW(hdc, cursor_x, ty, &wc, 1);
 						SetTextColor(hdc, COL_FG);
 					}
 				}
+				cursor_drawn = 1;
 			}
 		}
 
-		char_off += ll + 1;
-		draw_row++;
+		char_off += ll + 1; /* +1 for newline */
 		line_num++;
-		line = nl ? nl + 1 : NULL;
+		if (!nl) break; /* last line had no newline */
+		ptr = nl + 1;
+	}
+
+	/* if cursor wasn't drawn (empty buffer or past end), draw at top-left */
+	if (editing && cursor_visible && !cursor_drawn && max_rows > 0) {
+		int ty = body_y;
+		if (app.vim.mode == MODE_INSERT)
+			fill_rect(hdc, body_x, ty, 2, font_h, COL_ACCENT);
+		else
+			fill_rect(hdc, body_x, ty, font_w, font_h, COL_FG);
 	}
 
 	SelectObject(hdc, old_font);
@@ -423,6 +440,8 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 				key = KEY_CTRL((int)wp - 'A' + 'a');
 		}
 		if (key) {
+			cursor_visible = 1; /* reset blink on keystroke */
+			SetTimer(hw, CURSOR_BLINK_TIMER, CURSOR_BLINK_MS, NULL);
 			app_key(&app, key);
 			if (!app.running) { PostQuitMessage(0); return 0; }
 			InvalidateRect(hw, NULL, FALSE);
@@ -434,6 +453,8 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 		int ch = (int)wp;
 		/* skip control chars already handled by WM_KEYDOWN */
 		if (ch >= 32 && ch < 127) {
+			cursor_visible = 1;
+			SetTimer(hw, CURSOR_BLINK_TIMER, CURSOR_BLINK_MS, NULL);
 			app_key(&app, ch);
 			if (!app.running) { PostQuitMessage(0); return 0; }
 			InvalidateRect(hw, NULL, FALSE);
@@ -462,6 +483,12 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 	case WM_MOUSEMOVE: {
 		int sx = GET_X_LPARAM(lp);
 		int sy = GET_Y_LPARAM(lp);
+
+		/* request WM_MOUSELEAVE when mouse exits the window */
+		TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hw, 0 };
+		TrackMouseEvent(&tme);
+
+		int old_hover = app.hovered_box;
 		app_mouse_move(&app, sfx(sx), sfy(sy));
 
 		/* set cursor shape based on hit zone */
@@ -474,10 +501,18 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 		default:         SetCursor(LoadCursor(NULL, IDC_ARROW)); break;
 		}
 
-		if (app.dragging)
+		/* redraw when hover state changes or during drag */
+		if (app.dragging || app.hovered_box != old_hover)
 			InvalidateRect(hw, NULL, FALSE);
 		return 0;
 	}
+
+	case WM_MOUSELEAVE:
+		if (app.hovered_box >= 0) {
+			app.hovered_box = -1;
+			InvalidateRect(hw, NULL, FALSE);
+		}
+		return 0;
 
 	case WM_MOUSEWHEEL: {
 		int delta = GET_WHEEL_DELTA_WPARAM(wp);
@@ -487,7 +522,21 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
 		return 0;
 	}
 
+	case WM_TIMER:
+		if (wp == CURSOR_BLINK_TIMER && app.editing) {
+			cursor_visible = !cursor_visible;
+			InvalidateRect(hw, NULL, FALSE);
+		}
+		return 0;
+
+	case WM_SETCURSOR:
+		/* prevent default cursor reset — we set it in WM_MOUSEMOVE */
+		if (LOWORD(lp) == HTCLIENT)
+			return TRUE;
+		break;
+
 	case WM_DESTROY:
+		KillTimer(hw, CURSOR_BLINK_TIMER);
 		PostQuitMessage(0);
 		return 0;
 	}
@@ -536,6 +585,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 
 	ShowWindow(hwnd, SW_SHOW);
 	UpdateWindow(hwnd);
+
+	/* start cursor blink timer */
+	SetTimer(hwnd, CURSOR_BLINK_TIMER, CURSOR_BLINK_MS, NULL);
 
 	/* message pump */
 	MSG msg;
