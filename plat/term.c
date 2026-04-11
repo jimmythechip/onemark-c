@@ -142,9 +142,9 @@ int plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms)
 	int rv = tb_peek_event(&ev, timeout_ms);
 
 	if (rv == TB_ERR_NO_EVENT || rv == TB_ERR_POLL)
-		return INPUT_NONE;
+		return OM_INPUT_NONE;
 	if (rv < 0)
-		return INPUT_NONE;
+		return OM_INPUT_NONE;
 
 	switch (ev.type) {
 	case TB_EVENT_KEY:
@@ -152,9 +152,9 @@ int plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms)
 			*key = (int)ev.ch;
 		} else {
 			*key = map_key(ev.key);
-			if (*key == 0) return INPUT_NONE;
+			if (*key == 0) return OM_INPUT_NONE;
 		}
-		return INPUT_KEY;
+		return OM_INPUT_KEY;
 
 	case TB_EVENT_MOUSE:
 		mouse->col = ev.x;
@@ -169,10 +169,10 @@ int plat_getinput(int *key, struct MouseEvent *mouse, int timeout_ms)
 		case TB_KEY_MOUSE_WHEEL_DOWN: mouse->button = 4; break;
 		default: mouse->button = 0; break;
 		}
-		return INPUT_MOUSE;
+		return OM_INPUT_MOUSE;
 
 	case TB_EVENT_RESIZE:
-		return INPUT_RESIZE;
+		return OM_INPUT_RESIZE;
 	}
-	return INPUT_NONE;
+	return OM_INPUT_NONE;
 }

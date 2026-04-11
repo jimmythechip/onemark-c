@@ -201,10 +201,10 @@ struct MouseEvent {
 };
 
 /* --- input result -------------------------------------------------------- */
-#define INPUT_KEY    1
-#define INPUT_MOUSE  2
-#define INPUT_NONE   0
-#define INPUT_RESIZE 3
+#define OM_INPUT_KEY    1
+#define OM_INPUT_MOUSE  2
+#define OM_INPUT_NONE   0
+#define OM_INPUT_RESIZE 3
 
 /* Special key codes (beyond ASCII) */
 #define KEY_ESC      27

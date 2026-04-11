@@ -319,16 +319,16 @@ int main(int argc, char **argv)
 	while (app.running) {
 		int result = plat_getinput(&key, &mouse, 50);
 
-		if (result == INPUT_RESIZE) {
+		if (result == OM_INPUT_RESIZE) {
 			app.view_w = plat_cols() * cfg_cell_w;
 			app.view_h = (plat_rows() - 1) * cfg_cell_h;
 			redraw();
 			continue;
 		}
-		if (result == INPUT_NONE)
+		if (result == OM_INPUT_NONE)
 			continue;
 
-		if (result == INPUT_MOUSE) {
+		if (result == OM_INPUT_MOUSE) {
 			/* convert cell coords to file-pixel coords */
 			int vp_col = px_to_col(app.vp_x);
 			int vp_row = px_to_row(app.vp_y);
@@ -349,7 +349,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		/* INPUT_KEY */
+		/* OM_INPUT_KEY */
 		app_key(&app, key);
 		redraw();
 	}

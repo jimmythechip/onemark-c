@@ -6,6 +6,10 @@
  * Hand-written line-by-line parser for the OneMark .md format.
  * No YAML library needed — the format is a strict subset.
  */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -145,18 +149,36 @@ static char *demote_headings(const char *body)
 /* Generate a simple timestamp-based ID (not SHA256 — good enough for phase 1) */
 static void generate_id(char *out)
 {
+#ifdef _WIN32
+	LARGE_INTEGER li;
+	QueryPerformanceCounter(&li);
+	unsigned long a = (unsigned long)time(NULL);
+	unsigned long b = (unsigned long)li.LowPart;
+	snprintf(out, ID_LEN + 1, "%08lx%08lx%08lx%08lx",
+		a, b, a ^ 0xdeadbeef, b ^ 0xcafebabe);
+#else
 	struct timespec ts;
 	clock_gettime(CLOCK_REALTIME, &ts);
 	snprintf(out, ID_LEN + 1, "%08lx%08lx%08lx%08lx",
 		(unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec,
 		(unsigned long)(ts.tv_sec ^ 0xdeadbeef),
 		(unsigned long)(ts.tv_nsec ^ 0xcafebabe));
+#endif
 }
 
+#ifndef _WIN32
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
 static void timestamp_now(char *out, int size)
 {
+#ifdef _WIN32
+	time_t t = time(NULL);
+	struct tm *tm = gmtime(&t);
+	snprintf(out, (size_t)size, "%04d-%02d-%02dT%02d:%02d:%02d.000000Z",
+		tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+		tm->tm_hour, tm->tm_min, tm->tm_sec);
+#else
 	struct timespec ts;
 	struct tm tm;
 	clock_gettime(CLOCK_REALTIME, &ts);
@@ -165,8 +187,11 @@ static void timestamp_now(char *out, int size)
 		tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
 		tm.tm_hour, tm.tm_min, tm.tm_sec,
 		ts.tv_nsec / 1000);
+#endif
 }
+#ifndef _WIN32
 #pragma GCC diagnostic pop
+#endif
 
 /* --- parse --------------------------------------------------------------- */
 

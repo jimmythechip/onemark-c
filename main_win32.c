@@ -3,9 +3,7 @@
  * Win32 window + GDI double-buffered rendering.
  * Upgrade path: swap GDI rendering for Direct2D + DirectWrite.
  */
-#define CONFIG_IMPL
-#define _UNICODE
-#define UNICODE
+/* config variables are defined in app.c (CONFIG_IMPL) */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>  /* GET_X_LPARAM etc. */
@@ -512,7 +510,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmdLine, int nShow)
 	app_init(&app, path);
 
 	/* register window class */
-	WNDCLASSEXW wc = { sizeof(wc) };
+	WNDCLASSEXW wc;
+	memset(&wc, 0, sizeof(wc));
+	wc.cbSize = sizeof(wc);
 	wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
 	wc.lpfnWndProc = wndproc;
 	wc.hInstance = hInst;
