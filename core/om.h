@@ -150,6 +150,9 @@ enum VimResult {
 
 #define SEARCH_MAX 128
 
+/* repeat buffer max size */
+#define REP_MAX 512
+
 struct VimState {
 	enum VimMode mode;
 	int  op;            /* pending operator: 'd', 'y', 'c', '>', '<', 0 */
@@ -171,6 +174,23 @@ struct VimState {
 	char mark_letter;   /* the letter, set with result */
 	/* Z prefix */
 	int  pending_Z;
+	/* f/t/F/T findchar */
+	int  findchar_cmd;  /* last find: 'f','t','F','T' or 0 */
+	int  findchar_ch;   /* last character searched for */
+	int  pending_find;  /* waiting for char after f/t/F/T */
+	int  pending_find_cmd; /* which find command is pending */
+	/* r (replace char) */
+	int  pending_r;     /* waiting for replacement char */
+	/* text objects */
+	int  pending_obj;   /* 'i' or 'a' in OP_PENDING, or in VISUAL */
+	/* dot repeat */
+	int  rep_buf[REP_MAX]; /* key sequence of last change */
+	int  rep_len;          /* length of last change sequence */
+	int  rec_buf[REP_MAX]; /* currently recording change */
+	int  rec_len;
+	int  recording;     /* 1 = recording keys for repeat */
+	int  replaying;     /* 1 = replaying (don't re-record) */
+	int  rep_count;     /* count used with last change */
 };
 
 /* --- mouse event --------------------------------------------------------- */

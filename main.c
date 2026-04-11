@@ -114,7 +114,6 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int focu
 	/* body lines */
 	char *content = gap_contents(&b->body);
 	char *line = content;
-	int line_idx = 0;
 
 	for (int row = 0; row < inner_h - 1; row++) {
 		int scr_row = r + 2 + row;
@@ -141,7 +140,6 @@ static void draw_box_content(struct Box *b, int r, int c, int w, int h, int focu
 			for (int x = 0; x < inner_w; x++)
 				plat_addch(' ', 0);
 		}
-		line_idx++;
 	}
 	free(content);
 }
@@ -224,12 +222,29 @@ static void draw_editing_box(struct Box *b, int r, int c, int w, int h)
 		}
 		plat_move(scr_row, c + 1);
 		int col = 0;
+		/* compute visual highlight range */
+		int vis_from = -1, vis_to = -1;
+		if (vim.mode == MODE_VISUAL || vim.mode == MODE_VLINE) {
+			vis_from = vim.visual_start;
+			vis_to = cursor_pos;
+			if (vis_from > vis_to) { int t = vis_from; vis_from = vis_to; vis_to = t; }
+			vis_to++; /* inclusive */
+			if (vim.mode == MODE_VLINE) {
+				/* extend to full lines */
+				int vf = vis_from, vt = vis_to > 0 ? vis_to - 1 : 0;
+				while (vf > 0 && gap_char_at(&b->body, vf - 1) != '\n') vf--;
+				while (vt < len && gap_char_at(&b->body, vt) != '\n') vt++;
+				vis_from = vf;
+				vis_to = vt;
+			}
+		}
 		while (char_idx < len && gap_char_at(&b->body, char_idx) != '\n' && col < inner_w) {
 			if (char_idx == cursor_pos) {
 				cursor_row = scr_row;
 				cursor_col = c + 1 + col;
 			}
-			plat_addch(gap_char_at(&b->body, char_idx), 0);
+			int attr = (char_idx >= vis_from && char_idx < vis_to) ? ATTR_REVERSE : 0;
+			plat_addch(gap_char_at(&b->body, char_idx), attr);
 			char_idx++;
 			col++;
 		}
@@ -418,6 +433,60 @@ static void cycle_tag(struct Box *b)
 	case TAG_TODO:       b->tag = TAG_REFERENCE; break;
 	case TAG_REFERENCE:  b->tag = TAG_NONE; break;
 	}
+}
+
+/* forward declarations */
+static void focus_box(int idx);
+
+/* --- box helpers --------------------------------------------------------- */
+
+static void box_free_contents(struct Box *b)
+{
+	gap_free(&b->body);
+	undo_free(&b->undo);
+	free(b->title);
+	for (int i = 0; i < b->custom_count; i++) {
+		free(b->custom[i].key);
+		free(b->custom[i].value);
+	}
+}
+
+static void do_delete_box(void)
+{
+	if (focused_box < 0 || focused_box >= file.box_count) return;
+	int del = focused_box;
+	box_free_contents(&file.boxes[del]);
+	if (del < file.box_count - 1)
+		memmove(&file.boxes[del], &file.boxes[del + 1],
+			(file.box_count - del - 1) * sizeof(struct Box));
+	file.box_count--;
+	editing = 0;
+	focused_box = del < file.box_count ? del : file.box_count - 1;
+	/* fix marks pointing to moved/deleted boxes */
+	for (int i = 0; i < 26; i++) {
+		if (marks[i].box == del) marks[i].box = -1;
+		else if (marks[i].box > del) marks[i].box--;
+	}
+	file.dirty = 1;
+}
+
+static void do_dup_box(void)
+{
+	if (focused_box < 0 || focused_box >= file.box_count) return;
+	if (file.box_count >= MAX_BOXES) return;
+	struct Box *src = &file.boxes[focused_box];
+	struct Box *nb = &file.boxes[file.box_count];
+	box_init_new(nb, src->x + 20, src->y + 20, cfg_box_w, cfg_box_h);
+	char *content = gap_contents(&src->body);
+	gap_free(&nb->body);
+	gap_init(&nb->body, content, strlen(content));
+	free(content);
+	free(nb->title);
+	nb->title = strdup(src->title);
+	nb->tag = src->tag;
+	file.box_count++;
+	focus_box(file.box_count - 1);
+	file.dirty = 1;
 }
 
 /* --- viewport auto-scroll ------------------------------------------------ */
@@ -799,36 +868,10 @@ do_drag:
 				}
 				break;
 			case 'd': /* duplicate box */
-				if (file.box_count < MAX_BOXES) {
-					struct Box *nb = &file.boxes[file.box_count];
-					box_init_new(nb, b->x + 20, b->y + 20, cfg_box_w, cfg_box_h);
-					/* copy body */
-					char *content = gap_contents(&b->body);
-					gap_free(&nb->body);
-					gap_init(&nb->body, content, strlen(content));
-					free(content);
-					/* copy title */
-					free(nb->title);
-					nb->title = strdup(b->title);
-					nb->tag = b->tag;
-					file.box_count++;
-					focus_box(file.box_count - 1);
-					file.dirty = 1;
-				}
+				do_dup_box();
 				break;
 			case 'D': /* delete box */
-				if (file.box_count > 0) {
-					int del = focused_box;
-					gap_free(&b->body);
-					undo_free(&b->undo);
-					free(b->title);
-					memmove(&file.boxes[del], &file.boxes[del + 1],
-						(file.box_count - del - 1) * sizeof(struct Box));
-					file.box_count--;
-					editing = 0;
-					focused_box = del < file.box_count ? del : file.box_count - 1;
-					file.dirty = 1;
-				}
+				do_delete_box();
 				break;
 			}
 			redraw();
@@ -974,33 +1017,9 @@ do_drag:
 				editing = 0;
 				plat_hide_cursor();
 			} else if (vim.result == VIM_RESULT_DELBOX) {
-				if (file.box_count > 0) {
-					int del = focused_box;
-					gap_free(&b->body);
-					undo_free(&b->undo);
-					free(b->title);
-					memmove(&file.boxes[del], &file.boxes[del + 1],
-						(file.box_count - del - 1) * sizeof(struct Box));
-					file.box_count--;
-					editing = 0;
-					focused_box = del < file.box_count ? del : file.box_count - 1;
-					file.dirty = 1;
-				}
+				do_delete_box();
 			} else if (vim.result == VIM_RESULT_DUPBOX) {
-				if (file.box_count < MAX_BOXES) {
-					struct Box *nb = &file.boxes[file.box_count];
-					box_init_new(nb, b->x + 20, b->y + 20, cfg_box_w, cfg_box_h);
-					char *content = gap_contents(&b->body);
-					gap_free(&nb->body);
-					gap_init(&nb->body, content, strlen(content));
-					free(content);
-					free(nb->title);
-					nb->title = strdup(b->title);
-					nb->tag = b->tag;
-					file.box_count++;
-					focus_box(file.box_count - 1);
-					file.dirty = 1;
-				}
+				do_dup_box();
 			}
 
 			if (vim.mode == MODE_NORMAL && key == KEY_ESC) {
